@@ -1,0 +1,18 @@
+[thresholds]
+confidence_attention = 4
+atomicity_attention = 4
+drift_attention = 6
+pollution_attention = 7
+celebrate_consecutive_n = 5
+loop_edits_in_window = 3
+loop_window_turns = 3
+context_pressure_pct = 85
+
+[grader]
+model = "claude-haiku-4-5-20251001"
+sliding_window_turns = 3
+inspect_model = "claude-sonnet-4-6"
+
+[ui]
+animations_enabled = true
+token_row_pct = 70

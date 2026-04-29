@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "phase": "pre",
+  "turn": 14,
+  "timestamp": "2026-04-29T11:42:18Z",
+  "scores": {
+    "confidence": {
+      "value": 6,
+      "rationale": "Goal clear (fix expired-token bug) but acceptance criteria absent for the refactor"
+    },
+    "atomicity": {
+      "value": 3,
+      "rationale": "Bundles bug fix + opportunistic refactor + test addition in one prompt"
+    },
+    "drift": {
+      "value": 2,
+      "rationale": "Aligned with auth refactor goal; in-scope file"
+    },
+    "pollution": {
+      "value": 4,
+      "rationale": "(carried from turn 13) Three superseded plans from turns 8-11 still present"
+    }
+  },
+  "tokens_used": 47823,
+  "tokens_limit": 200000,
+  "dominant_signal": "atomicity",
+  "summary_update": "User refactoring auth to JWT. Through turn 13, validation logic and middleware updated. Turn 14 expands scope to bundled bug fix + refactor + test."
+}

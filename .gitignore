@@ -1,0 +1,19 @@
+# Swift / SPM
+.build/
+.swiftpm/
+Package.resolved
+DerivedData/
+*.xcodeproj/
+
+# macOS
+.DS_Store
+
+# Release artifacts
+*.dmg
+*.zip
+.build/stage/
+
+# User-local credentials / settings
+.env
+.env.*
+.dev.vars
