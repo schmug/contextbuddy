@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "phase": "post",
+  "turn": 29,
+  "timestamp": "2026-04-29T13:08:51Z",
+  "scores": {
+    "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
+    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
+    "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
+  },
+  "tokens_used": 71402,
+  "tokens_limit": 200000,
+  "dominant_signal": "loop",
+  "summary_update": "Turns 27-29 all editing src/auth/jwt.ts in fix-test-fix cycle. Test still failing. Possible loop."
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "phase": "post",
+  "turn": 22,
+  "timestamp": "2026-04-29T12:31:04Z",
+  "scores": {
+    "confidence": {"value": 8, "rationale": "Prompt specified acceptance and constraint; agent followed precisely"},
+    "atomicity": {"value": 9, "rationale": "Single action: rename and relocate utility function with no other changes"},
+    "drift": {"value": 1, "rationale": "Tightly aligned with anchor; in-scope file"},
+    "pollution": {"value": 3, "rationale": "Some accumulated tool results from turn 19 file read"}
+  },
+  "tokens_used": 58104,
+  "tokens_limit": 200000,
+  "dominant_signal": null,
+  "summary_update": "Turns 18-22: clean refactor sequence, atomic prompts, no scope drift. JWT validation now passes existing tests."
+}

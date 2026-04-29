@@ -1,0 +1,18 @@
+{
+  "name": "contextbuddy",
+  "version": "1.0.0",
+  "description": "Grades prompt and context quality during Claude Code sessions and surfaces results through an ambient macOS menubar buddy.",
+  "author": "ContextBuddy contributors",
+  "license": "MIT",
+  "hooks": {
+    "UserPromptSubmit": "hooks/user_prompt_submit.sh",
+    "Stop": "hooks/stop.sh"
+  },
+  "commands": {
+    "inspect": "commands/inspect.md",
+    "inspect_init": "commands/inspect_init.md",
+    "inspect_history": "commands/inspect_history.md",
+    "inspect_diff": "commands/inspect_diff.md"
+  },
+  "statusLine": "statusline.sh"
+}
