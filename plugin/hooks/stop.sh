@@ -18,6 +18,7 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/project_hash.sh"
 . "$PLUGIN_ROOT/lib/session_paths.sh"
 . "$PLUGIN_ROOT/lib/transcript.sh"
+. "$PLUGIN_ROOT/lib/config.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -49,21 +50,12 @@ TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # Append edited files to edits.jsonl. Q8 decision: keep last loop_window_turns
 # (default 3) entries.
 EDITS_PATH="$(edits_jsonl_path "$PROJECT_HASH")"
-LOOP_WINDOW="3"
-LOOP_EDITS_IN_WINDOW="3"
 CONFIG_PATH="$(config_path)"
-GRADER_MODEL="claude-haiku-4-5-20251001"
-CONTEXT_PRESSURE_PCT="85"
-if [ -f "$CONFIG_PATH" ]; then
-  LOOP_WINDOW="$(grep -E '^loop_window_turns[[:space:]]*=' "$CONFIG_PATH" | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' || echo 3)"
-  LOOP_WINDOW="${LOOP_WINDOW:-3}"
-  LOOP_EDITS_IN_WINDOW="$(grep -E '^loop_edits_in_window[[:space:]]*=' "$CONFIG_PATH" | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' || echo 3)"
-  LOOP_EDITS_IN_WINDOW="${LOOP_EDITS_IN_WINDOW:-3}"
-  GRADER_MODEL="$(grep -E '^model[[:space:]]*=' "$CONFIG_PATH" | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)"
-  GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
-  CONTEXT_PRESSURE_PCT="$(grep -E '^context_pressure_pct[[:space:]]*=' "$CONFIG_PATH" | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' || true)"
-  CONTEXT_PRESSURE_PCT="${CONTEXT_PRESSURE_PCT:-85}"
-fi
+LOOP_WINDOW="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "loop_window_turns" 3)"
+LOOP_EDITS_IN_WINDOW="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "loop_edits_in_window" 3)"
+GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
+GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
+CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 
 if command -v jq >/dev/null 2>&1; then
   EDITED_FILES_JSON="$(printf '%s' "$HOOK_PAYLOAD" | jq -c '
@@ -116,7 +108,8 @@ fi
 GRADE_JSON="$("$PLUGIN_ROOT/grader/invoke.sh" \
   "$PLUGIN_ROOT/grader/system_prompt.md" \
   "$INPUT_FILE" \
-  "$GRADER_MODEL" 2>/dev/null || true)"
+  "$GRADER_MODEL" \
+  "$CONFIG_PATH" 2>/dev/null || true)"
 
 if [ -z "$GRADE_JSON" ]; then
   log_err "grader returned no output for turn $TURN (post); skipping"

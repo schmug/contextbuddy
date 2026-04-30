@@ -180,14 +180,41 @@ public struct Config: Equatable, Sendable {
     }
 
     public struct Grader: Equatable, Sendable {
+        public var backend: String
         public var model: String
         public var slidingWindowTurns: Int
         public var inspectModel: String
+        public var ollama: Ollama
+        public var openaiCompatible: OpenAICompatible
 
-        public init(model: String, slidingWindowTurns: Int, inspectModel: String) {
+        public struct Ollama: Equatable, Sendable {
+            public var endpoint: String
+            public init(endpoint: String) { self.endpoint = endpoint }
+        }
+
+        public struct OpenAICompatible: Equatable, Sendable {
+            public var endpoint: String
+            public var apiKeyEnv: String
+            public init(endpoint: String, apiKeyEnv: String) {
+                self.endpoint = endpoint
+                self.apiKeyEnv = apiKeyEnv
+            }
+        }
+
+        public init(
+            backend: String = "anthropic",
+            model: String,
+            slidingWindowTurns: Int,
+            inspectModel: String,
+            ollama: Ollama = Ollama(endpoint: "http://localhost:11434"),
+            openaiCompatible: OpenAICompatible = OpenAICompatible(endpoint: "http://localhost:1234/v1", apiKeyEnv: "")
+        ) {
+            self.backend = backend
             self.model = model
             self.slidingWindowTurns = slidingWindowTurns
             self.inspectModel = inspectModel
+            self.ollama = ollama
+            self.openaiCompatible = openaiCompatible
         }
     }
 
@@ -220,9 +247,12 @@ public struct Config: Equatable, Sendable {
             contextPressurePct: 85
         ),
         grader: Grader(
+            backend: "anthropic",
             model: "claude-haiku-4-5-20251001",
             slidingWindowTurns: 3,
-            inspectModel: "claude-sonnet-4-6"
+            inspectModel: "claude-sonnet-4-6",
+            ollama: Grader.Ollama(endpoint: "http://localhost:11434"),
+            openaiCompatible: Grader.OpenAICompatible(endpoint: "http://localhost:1234/v1", apiKeyEnv: "")
         ),
         ui: UI(animationsEnabled: true, tokenRowPct: 70)
     )
@@ -251,7 +281,7 @@ public extension Config {
 
             if line.hasPrefix("[") && line.hasSuffix("]") {
                 section = String(line.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-                if !["thresholds", "grader", "ui"].contains(section) {
+                if !["thresholds", "grader", "grader.ollama", "grader.openai_compatible", "ui"].contains(section) {
                     throw ConfigParseError.unknownSection(section)
                 }
                 continue
@@ -279,12 +309,30 @@ public extension Config {
                 }
             case "grader":
                 switch key {
+                case "backend":
+                    grader.backend = try parseString(valueRaw, section: section, key: key)
                 case "model":
                     grader.model = try parseString(valueRaw, section: section, key: key)
                 case "sliding_window_turns":
                     grader.slidingWindowTurns = try parseInt(valueRaw, section: section, key: key)
                 case "inspect_model":
                     grader.inspectModel = try parseString(valueRaw, section: section, key: key)
+                default:
+                    throw ConfigParseError.unknownKey(section: section, key: key)
+                }
+            case "grader.ollama":
+                switch key {
+                case "endpoint":
+                    grader.ollama.endpoint = try parseString(valueRaw, section: section, key: key)
+                default:
+                    throw ConfigParseError.unknownKey(section: section, key: key)
+                }
+            case "grader.openai_compatible":
+                switch key {
+                case "endpoint":
+                    grader.openaiCompatible.endpoint = try parseString(valueRaw, section: section, key: key)
+                case "api_key_env":
+                    grader.openaiCompatible.apiKeyEnv = try parseString(valueRaw, section: section, key: key)
                 default:
                     throw ConfigParseError.unknownKey(section: section, key: key)
                 }

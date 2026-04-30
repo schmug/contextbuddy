@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "phase": "pre",
+  "turn": 1,
+  "timestamp": "2026-04-29T12:00:00Z",
+  "scores": {
+    "confidence": {"value": 7, "rationale": "Clear goal stated."},
+    "atomicity": {"value": 6, "rationale": "Single-task scope."},
+    "drift": {"value": 2, "rationale": "Aligned with anchor."},
+    "pollution": {"value": 3, "rationale": "Light superseded context."}
+  },
+  "tokens_used": 12000,
+  "tokens_limit": 200000,
+  "dominant_signal": null,
+  "summary_update": "Smoke-test fixture grade for invoke.sh dispatcher tests."
+}

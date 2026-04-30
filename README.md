@@ -28,11 +28,26 @@ For a notarized release build with a hardened runtime + DMG, use `scripts/releas
 
 ### Install the Claude Code plugin
 
+For local development (loads the plugin only for the session you launch):
+
 ```bash
-claude code plugin install ./plugin/
+claude --plugin-dir ./plugin/
 ```
 
-(Verify the exact CLI surface against the current Claude Code docs — the plugin command may have evolved.)
+For a persistent install, add this repo as a marketplace and install via the manifest at `plugin/.claude-plugin/plugin.json`:
+
+```bash
+claude plugin marketplace add ./plugin
+claude plugin install contextbuddy
+```
+
+To verify the plugin manifest:
+
+```bash
+claude plugin validate ./plugin
+```
+
+**Status line**: ContextBuddy ships a `plugin/statusline.sh` that prints the current grade compactly. The Claude Code plugin schema does not yet have a status-line declaration; wire it up manually by adding the script path to `~/.claude/settings.json` under `statusLine` if you want it.
 
 ### Bootstrap your first session anchor
 
@@ -43,6 +58,14 @@ In any project:
 ```
 
 This drops a starter `session.md` at `~/.claude/inspector/sessions/<project-hash>/session.md`. Edit it to describe your goal, acceptance criteria, and scope. The grader uses this as ground truth for `confidence` and `drift` scoring.
+
+### Pick a grader backend
+
+The grader runs once per turn and needs an LLM. You have three options — see [Backends](#backends) below for the full picture:
+
+- **Anthropic Haiku 4.5** (default): runs `claude -p` on a second Claude account; point `CONTEXTBUDDY_CLAUDE_CONFIG_DIR` (env or `.env`) at that account's config dir. Billed to that account; quality floor.
+- **Local via Ollama**: install Ollama, pull a model, edit `config.toml`. No API key, no per-grade cost.
+- **OpenAI-compatible local server** (LM Studio, llama.cpp, vLLM, …): edit `config.toml`. No API key required for unauthenticated local servers.
 
 ---
 
@@ -222,9 +245,17 @@ loop_window_turns = 3
 context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy
 
 [grader]
+backend = "anthropic"       # "anthropic" | "ollama" | "openai_compatible"
 model = "claude-haiku-4-5-20251001"
 sliding_window_turns = 3
 inspect_model = "claude-sonnet-4-6"
+
+[grader.ollama]             # used when backend = "ollama"
+endpoint = "http://localhost:11434"
+
+[grader.openai_compatible]  # used when backend = "openai_compatible"
+endpoint = "http://localhost:1234/v1"
+api_key_env = ""            # name of an env var holding a bearer token; "" = no auth
 
 [ui]
 animations_enabled = true
@@ -232,6 +263,76 @@ token_row_pct = 70          # show ⚡ row when usage > this percent
 ```
 
 Both the buddy and the plugin read this on each grade event. Hot-reload is automatic.
+
+---
+
+## Backends
+
+The grader system prompt is model-agnostic — it specifies inputs and a strict JSON output schema. Any model capable of following that schema can grade.
+
+### `anthropic` (default)
+
+Uses `claude -p` to invoke Haiku 4.5 (or any Claude model you set via `[grader].model`) as a **second Claude account**: `CONTEXTBUDDY_CLAUDE_CONFIG_DIR` (environment, or a `.env` in the project) points at a Claude config directory signed in as the grader account, and the child runs with `CLAUDE_CONFIG_DIR` set to it, `ANTHROPIC_API_KEY` scrubbed, tools and MCP off, and extended thinking off (`MAX_THINKING_TOKENS=0`, about 6 s per grade). Subprocess hooks cannot reach the session's own keychain credential, which is why a separate config dir is required. Missing or invalid dir: the grade is skipped (exit 5) and logged.
+
+```toml
+[grader]
+backend = "anthropic"
+model = "claude-haiku-4-5-20251001"
+```
+
+```bash
+# once: sign in the grader account into its own config dir
+CLAUDE_CONFIG_DIR=~/.claude-grader claude login
+# then, in the environment Claude Code inherits or in the project's .env
+export CONTEXTBUDDY_CLAUDE_CONFIG_DIR=~/.claude-grader
+```
+
+### `ollama`
+
+Runs grading entirely locally via [Ollama](https://ollama.com). No API key, no per-grade cost, works offline.
+
+```bash
+brew install ollama
+ollama serve &
+ollama pull qwen2.5:14b-instruct
+```
+
+```toml
+[grader]
+backend = "ollama"
+model = "qwen2.5:14b-instruct"
+
+[grader.ollama]
+endpoint = "http://localhost:11434"
+```
+
+The plugin sends `format: "json"` so Ollama constrains the model to schema-conformant output.
+
+### `openai_compatible`
+
+For LM Studio, llama.cpp's `--server`, vLLM, or any hosted OpenAI-compatible gateway.
+
+```toml
+[grader]
+backend = "openai_compatible"
+model = "your-model-id"
+
+[grader.openai_compatible]
+endpoint = "http://localhost:1234/v1"
+api_key_env = ""            # set to e.g. "OPENROUTER_API_KEY" for hosted gateways
+```
+
+The plugin sends `response_format: {type: "json_object"}` for schema conformance.
+
+### Recommended local models
+
+| Model | Notes |
+|---|---|
+| `qwen2.5:14b-instruct` | Practical floor for the rubric. ~9 GB, runs on Apple Silicon with ≥16 GB RAM. |
+| `llama3.3:70b` | Better atomicity scoring; needs ~40 GB RAM or quantized variant. |
+| Smaller models (≤7B) | Will score the **atomicity** dimension noisily — bundles, side-quests, and acceptance gaps get conflated. A noisy attention signal trains you to mute the buddy, which defeats the point. Avoid for production grading; fine for smoke-testing the loop. |
+
+Different backends produce different score distributions; don't mix-and-match within a session if you care about consecutive-N celebrate streaks.
 
 ---
 
@@ -280,6 +381,15 @@ By design (§9.6 / §15):
 | `/inspect` | Sonnet 4.6 deep-dive grade. Writes `inspect_<turn>.md`. |
 | `/inspect history` | Compact timeline of grades from `history.jsonl`. |
 | `/inspect diff <turn1> <turn2>` | Diff two grade JSONs side-by-side. |
+
+---
+
+## Tests
+
+```bash
+swift test                    # core (Schemas, StateMachine, Storage, Watcher, …)
+bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hooks)
+```
 
 ---
 

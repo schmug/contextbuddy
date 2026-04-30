@@ -9,9 +9,27 @@ loop_window_turns = 3
 context_pressure_pct = 85
 
 [grader]
+# backend selects which inference runtime grades each turn (issue #3).
+# "anthropic" (default) requires ANTHROPIC_API_KEY and uses claude --bare.
+# "ollama" and "openai_compatible" run locally via curl, no API key needed.
+backend = "anthropic"
 model = "claude-haiku-4-5-20251001"
 sliding_window_turns = 3
 inspect_model = "claude-sonnet-4-6"
+
+# Used when backend = "ollama". Pull a recommended model first:
+#   ollama pull qwen2.5:14b-instruct
+# Then set [grader].model = "qwen2.5:14b-instruct" above.
+[grader.ollama]
+endpoint = "http://localhost:11434"
+
+# Used when backend = "openai_compatible" (LM Studio, llama.cpp server,
+# vLLM, hosted OpenAI-compatible gateways, etc.). api_key_env is the *name*
+# of an environment variable to read the bearer token from; leave empty
+# for unauthenticated local servers.
+[grader.openai_compatible]
+endpoint = "http://localhost:1234/v1"
+api_key_env = ""
 
 [ui]
 animations_enabled = true
