@@ -39,6 +39,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/dotenv.sh"
 # shellcheck source=../lib/config.sh
 . "$PLUGIN_ROOT/lib/config.sh"
+# shellcheck source=../lib/job.sh
+. "$PLUGIN_ROOT/lib/job.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -112,7 +114,8 @@ CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "contex
 
 # Assemble grader input bundle.
 INPUT_FILE="$(mktemp)"
-trap 'rm -f "$INPUT_FILE"; release_lock "$PROJECT_HASH" "write"' EXIT
+JOB_FILE="$(mktemp)"
+trap 'rm -f "$INPUT_FILE" "$JOB_FILE"; release_lock "$PROJECT_HASH" "write"' EXIT
 {
   printf '## session.md\n```yaml\n'
   read_session_md "$PROJECT_HASH"
@@ -129,8 +132,15 @@ trap 'rm -f "$INPUT_FILE"; release_lock "$PROJECT_HASH" "write"' EXIT
   printf '## latest prompt\n%s\n' "$HOOK_PAYLOAD"
 } > "$INPUT_FILE"
 
+# Job file for the typesafe backend (grader/jev.mjs reads it on stdin; other
+# backends ignore it). A build failure leaves {} so the grader exits 2 and
+# this hook logs and skips, never blocks.
+build_job "pre" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
+  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" \
+  > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
+
 # Call grader. Failures here are non-fatal.
-GRADE_JSON="$("$PLUGIN_ROOT/grader/invoke.sh" \
+GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
   "$PLUGIN_ROOT/grader/system_prompt.md" \
   "$INPUT_FILE" \
   "$GRADER_MODEL" \

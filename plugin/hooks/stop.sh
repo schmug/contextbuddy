@@ -19,6 +19,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/session_paths.sh"
 . "$PLUGIN_ROOT/lib/transcript.sh"
 . "$PLUGIN_ROOT/lib/config.sh"
+# shellcheck source=../lib/job.sh
+. "$PLUGIN_ROOT/lib/job.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -33,8 +35,9 @@ if ! acquire_lock "$PROJECT_HASH" "write"; then
 fi
 
 INPUT_FILE="$(mktemp)"
+JOB_FILE="$(mktemp)"
 cleanup() {
-  rm -f "$INPUT_FILE"
+  rm -f "$INPUT_FILE" "$JOB_FILE"
   release_lock "$PROJECT_HASH" "write"
 }
 trap cleanup EXIT
@@ -105,7 +108,12 @@ fi
   printf '## completed turn\n%s\n' "$HOOK_PAYLOAD"
 } > "$INPUT_FILE"
 
-GRADE_JSON="$("$PLUGIN_ROOT/grader/invoke.sh" \
+# Job file for the typesafe backend (see user_prompt_submit.sh).
+build_job "post" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
+  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" \
+  > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
+
+GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
   "$PLUGIN_ROOT/grader/system_prompt.md" \
   "$INPUT_FILE" \
   "$GRADER_MODEL" \

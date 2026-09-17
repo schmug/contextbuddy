@@ -136,7 +136,7 @@ const baseJob = (over = {}) => ({
   hook: { session_id: 's', transcript_path: transcriptPath, cwd: '/tmp/p', prompt: 'fix the auth bug and also refactor the validator and add a test' },
   session_md: 'goal: Refactor auth module to use JWT\nout_of_scope: [frontend/]',
   prior_pollution: { turn: 13, value: 4, rationale: 'three superseded plans' },
-  tokens_limit: 200000, window_turns: 3, model: 'jev-latest', thresholds,
+  tokens_limit: 200000, window_turns: 3, model: 'jev-1.13.0', thresholds,
   ...over,
 })
 const fakeFetch = (body, { status = 200, capture = {} } = {}) => async (url, init) => {
@@ -156,7 +156,7 @@ test('grade sends one request with every question over a bounded state and retur
   assert.ok(String(capture.url).endsWith('/v1/systemone'))
   assert.equal(capture.init.headers.Authorization, 'Bearer k-test')
   const body = JSON.parse(capture.init.body)
-  assert.equal(body.model, 'jev-latest')
+  assert.equal(body.model, 'jev-1.13.0')
   assert.deepEqual(Object.keys(body.questions).sort(), Object.keys(grader.QUESTIONS).sort())
   assert.equal(body.state.prompt, 'fix the auth bug and also refactor the validator and add a test')
   assert.equal(body.state.anchor.split('\n')[0], 'goal: Refactor auth module to use JWT')

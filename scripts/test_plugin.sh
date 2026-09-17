@@ -20,6 +20,13 @@ for t in Tests/plugin/test_*.sh; do
   bash "$t" || rc=1
 done
 
+echo "== node --test Tests/plugin/test_jev_grader.mjs"
+if command -v node >/dev/null 2>&1; then
+  node --test Tests/plugin/test_jev_grader.mjs || rc=1
+else
+  echo "node not installed; skipped"
+fi
+
 echo "== shellcheck -S error"
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck -S error plugin/hooks/*.sh plugin/lib/*.sh plugin/grader/*.sh plugin/statusline.sh scripts/*.sh Tests/plugin/*.sh || rc=1

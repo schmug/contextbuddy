@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # invoke — call the grader model and emit strict JSON.
 #
-# Backends (issue #3): anthropic (default), ollama, openai_compatible. Selected via
+# Backends (issue #3): anthropic (default), ollama, openai_compatible, typesafe. Selected via
 # [grader].backend in ~/.claude/inspector/config.toml (4th argument). Local backends
 # use curl plus the runtime's structured-output mode (Ollama format=json,
 # OpenAI-compatible response_format=json_object) to keep small models
@@ -104,8 +104,34 @@ case "$BACKEND" in
       exit 2
     fi
     ;;
+  typesafe)
+    # Node grader (grader/jev.mjs). Needs the job file the hooks write
+    # (CONTEXTBUDDY_JOB), a Node 20+ runtime, and TYPESAFE_API_KEY. No new
+    # config.toml keys: the Swift config parser rejects unknown keys and
+    # would then drop the whole file, thresholds included.
+    NODE_BIN="${CONTEXTBUDDY_NODE:-}"
+    if [ -z "$NODE_BIN" ]; then
+      NODE_BIN="$(command -v node 2>/dev/null || true)"
+    fi
+    if [ -z "$NODE_BIN" ] && [ -x "$HOME/.local/bin/node" ]; then
+      NODE_BIN="$HOME/.local/bin/node"
+    fi
+    if [ -z "$NODE_BIN" ]; then
+      printf 'contextbuddy: node not found (set CONTEXTBUDDY_NODE or install Node 20+); typesafe backend skipped\n' >&2
+      exit 2
+    fi
+    if [ -z "${CONTEXTBUDDY_JOB:-}" ] || [ ! -f "$CONTEXTBUDDY_JOB" ]; then
+      printf 'contextbuddy: CONTEXTBUDDY_JOB not set or missing; typesafe backend needs the hook job file\n' >&2
+      exit 2
+    fi
+    if [ -z "${TYPESAFE_API_KEY:-}" ]; then
+      printf 'contextbuddy: TYPESAFE_API_KEY not set — grader skipped.\n' >&2
+      printf 'contextbuddy: export it in the environment Claude Code inherits, or switch [grader].backend.\n' >&2
+      exit 5
+    fi
+    ;;
   *)
-    printf 'contextbuddy: unknown grader backend "%s" (expected anthropic|ollama|openai_compatible)\n' "$BACKEND" >&2
+    printf 'contextbuddy: unknown grader backend "%s" (expected anthropic|ollama|openai_compatible|typesafe)\n' "$BACKEND" >&2
     exit 2
     ;;
 esac
@@ -117,6 +143,23 @@ mkdir -p "$CHILD_CWD" 2>/dev/null || CHILD_CWD="${TMPDIR:-/tmp}"
 
 CHILD_ERR="$(mktemp "${TMPDIR:-/tmp}/contextbuddy-invoke.XXXXXX")"
 trap 'rm -f "$CHILD_ERR"' EXIT
+
+# typesafe runs exactly once and returns here. Empty output with exit 0 is the
+# is_task gate deciding this was not a prompt (jev.mjs already said so on
+# stderr), so it must not be retried or reported as an empty-output failure.
+# Non-zero exits carry jev.mjs's own contextbuddy: line and code (2/3/4/5).
+if [ "$BACKEND" = "typesafe" ]; then
+  OUTPUT="$("$NODE_BIN" "$PLUGIN_ROOT/grader/jev.mjs" < "$CONTEXTBUDDY_JOB")"
+  rc=$?
+  [ "$rc" -ne 0 ] && exit "$rc"
+  [ -z "$OUTPUT" ] && exit 0
+  if command -v jq >/dev/null 2>&1 && ! printf '%s' "$OUTPUT" | jq -e . >/dev/null 2>&1; then
+    printf 'contextbuddy: grader output is not valid JSON (backend=typesafe)\n' >&2
+    exit 4
+  fi
+  printf '%s\n' "$OUTPUT"
+  exit 0
+fi
 
 run_anthropic_once() {
   # --tools "" disables tool use so the grader cannot side-effect anything.

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// jev.mjs — the `typesafe` grader backend (TypeSafe System One, model jev-latest).
+// jev.mjs — the `typesafe` grader backend (TypeSafe System One, model jev-1.13.0).
 //
 // Reads a JSON job on stdin (written by hooks/user_prompt_submit.sh and hooks/stop.sh),
 // loads the turn window from the hook's `transcript_path`, sends ONE System One request
@@ -420,7 +420,7 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
     phase,
   })
 
-  const response = await request({ state, model: job.model || 'jev-latest', key, fetchImpl, baseUrl: env.TYPESAFE_BASE_URL })
+  const response = await request({ state, model: job.model || 'jev-1.13.0', key, fetchImpl, baseUrl: env.TYPESAFE_BASE_URL })
   const answers = response.answers
   if (isTaskGated(answers)) return { gated: true, is_task: answers.is_task.noul, usage: response.usage }
 
