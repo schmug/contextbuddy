@@ -40,9 +40,14 @@ cat "$GRADE_FILE"
 STUBEOF
 chmod +x "$TMP/bin/claude"
 
-# stage_grade <phase> <tokens_used> — compact §4.1 grade the stub will return.
+# stage_grade <phase> <tokens_used> [pretty] — §4.1 grade the stub will return. Compact by
+# default; "pretty" emits the multi-line JSON that claude -p (Haiku) and the other LLM
+# backends actually return, so the hooks must compact at the write site, not only on the
+# override branches.
 stage_grade() {
-  jq -c -n --arg phase "$1" --argjson used "$2" '{
+  local flag="-c"; [ "${3:-}" = "pretty" ] && flag=""
+  # shellcheck disable=SC2086  # $flag is intentionally empty or -c
+  jq $flag -n --arg phase "$1" --argjson used "$2" '{
     schema_version: 1, phase: $phase, turn: 1, timestamp: "2026-09-18T00:00:00Z",
     scores: {
       confidence: {value: 7, rationale: "r"}, atomicity: {value: 7, rationale: "r"},
@@ -120,6 +125,20 @@ rc="$(run_hook "$POST_HOOK" "$POST_PAYLOAD")"; GRADES=$((GRADES+1))
 [ "$rc" = "0" ] && ok "no override: hook exits 0" || fail "no override: hook exit $rc"
 [ "$(last_dominant)" = "null" ] && ok "no override: dominant_signal untouched" || fail "no override: dominant_signal is '$(last_dominant)'"
 assert_one_line_per_grade "no override"
+
+# --- 5. pretty-printed backend output, no override (the anthropic path in production) -----
+# Session 30cf4cb32f42 on 2026-09-18: one Haiku grade, dominant_signal null, 28 lines.
+stage_grade pre 1000 pretty
+rc="$(run_hook "$PRE_HOOK" "$PRE_PAYLOAD")"; GRADES=$((GRADES+1))
+[ "$rc" = "0" ] && ok "pretty pre: hook exits 0" || fail "pretty pre: hook exit $rc"
+[ "$(last_dominant)" = "null" ] && ok "pretty pre: dominant_signal untouched" || fail "pretty pre: dominant_signal is '$(last_dominant)'"
+assert_one_line_per_grade "pretty pre"
+
+stage_grade post 1000 pretty
+rc="$(run_hook "$POST_HOOK" "$POST_PAYLOAD")"; GRADES=$((GRADES+1))
+[ "$rc" = "0" ] && ok "pretty post: hook exits 0" || fail "pretty post: hook exit $rc"
+[ "$(last_dominant)" = "null" ] && ok "pretty post: dominant_signal untouched" || fail "pretty post: dominant_signal is '$(last_dominant)'"
+assert_one_line_per_grade "pretty post"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
