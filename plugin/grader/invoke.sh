@@ -1,13 +1,29 @@
 #!/usr/bin/env bash
 # invoke — call the grader model and emit strict JSON.
 #
-# Q4 decision: use Claude Code's managed credential. We invoke the `claude`
-# CLI in print mode (`claude -p`) which inherits the user's authenticated
-# session. No separate ANTHROPIC_API_KEY required.
+# Credential (issue #13, Cory 2026-09-18): a SECOND Claude account, selected by
+# pointing CLAUDE_CONFIG_DIR at its config directory. `claude -p` then reads that
+# directory's own sign-in (.claude.json + a per-directory keychain entry), so the
+# grader bills that account, not the session's, and never needs ANTHROPIC_API_KEY.
+# `claude --bare` is NOT used: it refuses OAuth/keychain and would need the key.
 #
-# Phase H caveat: the exact `claude -p` flag set evolved with the CLI; this
-# script targets the modern form (`claude --model <id> --output-format text
-# -p`). Adjust if the CLI surface has shifted at install time.
+# Config dir resolution, first hit wins; none found -> log and skip (exit 5, §13):
+#   1. $CONTEXTBUDDY_CLAUDE_CONFIG_DIR in the environment
+#   2. CONTEXTBUDDY_CLAUDE_CONFIG_DIR in a .env found by lib/dotenv.sh
+#      (hooks fired from the desktop app do not see shell-exported vars)
+# Not config.toml: Sources/ContextBuddyCore/Schemas.swift rejects unknown keys and
+# drops the whole file to defaults.
+#
+# Child invariants (Tests/plugin/test_invoke_config_dir.sh):
+#   - CONTEXTBUDDY_SKIP=1 so this plugin's hooks exit 0 inside the child (recursion
+#     guard; -p mode still runs hooks).
+#   - ANTHROPIC_API_KEY is removed from the child env. In -p mode the CLI always
+#     prefers that key over the login, which would silently switch the account.
+#   - cwd is a neutral directory, so the child does not load the graded project's
+#     CLAUDE.md, .claude/settings.json hooks, or MCP servers.
+#   - Nothing from the credential store is printed.
+#   - HOME must be the real one: the CLI finds the login keychain through HOME, so a
+#     test that overrides HOME gets "Not logged in" (use a stub `claude` instead).
 #
 # Usage:
 #   plugin/grader/invoke.sh <system_prompt_path> <user_input_path> <model> > out.json
@@ -25,40 +41,55 @@ SYSTEM_PROMPT_PATH="${1:?system prompt path required}"
 USER_INPUT_PATH="${2:?user input path required}"
 MODEL="${3:?model id required}"
 
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../lib/dotenv.sh
+. "$PLUGIN_ROOT/lib/dotenv.sh"
+
 if ! command -v claude >/dev/null 2>&1; then
   printf 'contextbuddy: `claude` CLI not found in PATH; cannot reach grader\n' >&2
   exit 2
 fi
 
-# Q4 deviation surfaced during Phase H verification: the Claude Code managed
-# credential (OAuth/keychain) is intentionally NOT accessible to subprocess
-# hooks. The only way to invoke the model in an isolated, non-recursive
-# context is `claude --bare`, which strictly requires ANTHROPIC_API_KEY.
-# We require it here and skip grading with a clear error if absent — per
-# §13's "log and skip" failure mode.
-if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
-  printf 'contextbuddy: ANTHROPIC_API_KEY not set — grader skipped.\n' >&2
-  printf 'contextbuddy: set the env var (e.g., in ~/.zshrc) to enable grading.\n' >&2
+CONFIG_DIR="${CONTEXTBUDDY_CLAUDE_CONFIG_DIR:-}"
+[ -n "$CONFIG_DIR" ] || CONFIG_DIR="$(dotenv_value CONTEXTBUDDY_CLAUDE_CONFIG_DIR || true)"
+if [ -z "$CONFIG_DIR" ]; then
+  printf 'contextbuddy: CONTEXTBUDDY_CLAUDE_CONFIG_DIR not set — grader skipped.\n' >&2
+  printf 'contextbuddy: point it (env or .env) at a Claude config dir signed in as the grader account.\n' >&2
+  exit 5
+fi
+if [ ! -d "$CONFIG_DIR" ]; then
+  printf 'contextbuddy: CONTEXTBUDDY_CLAUDE_CONFIG_DIR=%s is not a directory — grader skipped.\n' "$CONFIG_DIR" >&2
   exit 5
 fi
 
+# Neutral cwd for the child (see header). Stable path so the account's .claude.json
+# gains one project entry, not one per grade.
+CHILD_CWD="${TMPDIR:-/tmp}/contextbuddy-grader"
+mkdir -p "$CHILD_CWD" 2>/dev/null || CHILD_CWD="${TMPDIR:-/tmp}"
+
+CHILD_ERR="$(mktemp "${TMPDIR:-/tmp}/contextbuddy-invoke.XXXXXX")"
+trap 'rm -f "$CHILD_ERR"' EXIT
+
 run_once() {
-  # --bare strips: hooks (no recursion), LSP, plugin sync, attribution,
-  # auto-memory, keychain reads, CLAUDE.md auto-discovery. This is exactly
-  # the surface we want for a one-shot grader inference.
   # --tools "" disables tool use so the grader cannot side-effect anything.
   # --system-prompt (not --append-) fully replaces the default so the
   # grader rubric is the only system context.
+  # --strict-mcp-config with no --mcp-config: no MCP servers are started.
+  # --no-session-persistence: nothing written under the account's projects/.
   local sys
   sys="$(cat "$SYSTEM_PROMPT_PATH")"
-  claude \
-    --bare \
-    --model "$MODEL" \
-    --output-format text \
-    --system-prompt "$sys" \
-    --tools "" \
-    --no-session-persistence \
-    -p "$(cat "$USER_INPUT_PATH")" 2>/dev/null
+  (
+    cd "$CHILD_CWD" || exit 1
+    CLAUDE_CONFIG_DIR="$CONFIG_DIR" CONTEXTBUDDY_SKIP=1 \
+      env -u ANTHROPIC_API_KEY claude \
+        --model "$MODEL" \
+        --output-format text \
+        --system-prompt "$sys" \
+        --tools "" \
+        --no-session-persistence \
+        --strict-mcp-config \
+        -p "$(cat "$USER_INPUT_PATH")" </dev/null 2>>"$CHILD_ERR"
+  )
 }
 
 strip_fences() {
@@ -78,6 +109,8 @@ fi
 
 if [ -z "$OUTPUT" ]; then
   printf 'contextbuddy: grader returned empty output after retry\n' >&2
+  # Last line of the CLI's stderr (e.g. "Not logged in"); the CLI never prints tokens.
+  [ -s "$CHILD_ERR" ] && printf 'contextbuddy: claude: %s\n' "$(tail -n 1 "$CHILD_ERR")" >&2
   exit 3
 fi
 

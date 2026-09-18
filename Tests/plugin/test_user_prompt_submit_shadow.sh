@@ -3,7 +3,7 @@
 # grader only when a TypeSafe key is present, and never touches the Haiku path.
 #
 # Runs the real hook under a throwaway HOME with a stub `claude` on PATH (the Haiku
-# grader exits 5 without ANTHROPIC_API_KEY, so no Haiku file is written either way)
+# grader exits 5 without CONTEXTBUDDY_CLAUDE_CONFIG_DIR, so no Haiku file is written either way)
 # and a stub runner via CONTEXTBUDDY_JEV_RUNNER that records how it was called.
 # shellcheck disable=SC2015  # `A && ok || fail` is the intended assertion idiom here
 set -uo pipefail
@@ -23,6 +23,7 @@ export HOME="$TMP/home"
 mkdir -p "$HOME" "$TMP/bin" "$TMP/project" "$TMP/project-nokey"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/claude"; chmod +x "$TMP/bin/claude"
 export PATH="$TMP/bin:$PATH"
+unset CONTEXTBUDDY_CLAUDE_CONFIG_DIR ANTHROPIC_API_KEY  # keep the Haiku path inert whatever the dev shell has
 
 STUB="$TMP/bin/jev_stub.sh"
 cat > "$STUB" <<'STUBEOF'
