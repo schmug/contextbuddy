@@ -1,0 +1,115 @@
+{
+ "model": "jev-1.13.0",
+ "answers": {
+  "is_task": {
+   "type": "noul",
+   "noul": 0.98
+  },
+  "specificity": {
+   "type": "score",
+   "score": 1.83,
+   "probabilities": {
+    "0": 0.03,
+    "1": 0.16,
+    "2": 0.76,
+    "3": 0.05,
+    "4": 0.0
+   },
+   "legend": {
+    "0": "The goal itself is ambiguous; several reasonable interpretations of what to do exist.",
+    "1": "A goal is stated but no acceptance criteria are given; \"done\" is undefined.",
+    "2": "Goal and an implicit sense of done are present, but scope and constraints are unstated.",
+    "3": "Goal, acceptance criteria and scope are explicit; constraints are implied or partly stated.",
+    "4": "Goal, acceptance criteria, scope and constraints are all explicit; no reasonable misreading is possible."
+   },
+   "confidence": 0.76
+  },
+  "atomicity": {
+   "type": "score",
+   "score": 1.02,
+   "probabilities": {
+    "0": 0.35,
+    "1": 0.32,
+    "2": 0.3,
+    "3": 0.02,
+    "4": 0.01
+   },
+   "legend": {
+    "0": "Several decisions AND several actions are mixed together in the request.",
+    "1": "The request needs a decision first and then an action that depends on that decision.",
+    "2": "Two distinct actions, or two distinct decisions, are bundled; each could be requested on its own.",
+    "3": "One primary thing with one minor subordinate task attached.",
+    "4": "Exactly one decision or one action with a clear boundary. A single change described in steps is still one action."
+   },
+   "confidence": 0.15
+  },
+  "drift": {
+   "type": "score",
+   "score": 0.91,
+   "probabilities": {
+    "0": 0.4,
+    "1": 0.36,
+    "2": 0.18,
+    "3": 0.05,
+    "4": 0.01
+   },
+   "legend": {
+    "0": "Tightly aligned with the anchor goal; no scope creep.",
+    "1": "Aligned with the goal, touching minor adjacent territory.",
+    "2": "Adjacent but defensible: same problem space, a different facet.",
+    "3": "Clear scope expansion, or partial encroachment on an out_of_scope item.",
+    "4": "Works on something the anchor explicitly excludes, or unrelated to the anchor goal."
+   },
+   "confidence": 0.28
+  },
+  "intent": {
+   "type": "choice",
+   "choice": "fix_bug",
+   "probabilities": {
+    "fix_bug": 1.0,
+    "add_feature": 0.0,
+    "refactor": 0.0,
+    "investigate": 0.0,
+    "plan_or_evaluate": 0.0,
+    "review": 0.0,
+    "operate": 0.0,
+    "correct_agent": 0.0,
+    "off_task": 0.0
+   },
+   "confidence": 1.0
+  },
+  "is_correction": {
+   "type": "noul",
+   "noul": 0.25
+  },
+  "destructive": {
+   "type": "noul",
+   "noul": 0.01
+  },
+  "bypass": {
+   "type": "noul",
+   "noul": 0.03
+  },
+  "severity": {
+   "type": "score",
+   "score": 1.0,
+   "probabilities": {
+    "0": 0.3,
+    "1": 0.45,
+    "2": 0.2,
+    "3": 0.05
+   },
+   "legend": {
+    "0": "No harm: reversible local changes only.",
+    "1": "Mild: recoverable with some effort (a bad commit, a broken test).",
+    "2": "Serious: lost work or a broken shared branch that others depend on.",
+    "3": "Severe: unrecoverable data loss, leaked secrets, or damage outside this repository."
+   },
+   "confidence": 0.45
+  }
+ },
+ "usage": {
+  "input_tokens": 2100,
+  "output_tokens": 9
+ }
+}

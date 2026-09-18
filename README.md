@@ -61,11 +61,12 @@ This drops a starter `session.md` at `~/.claude/inspector/sessions/<project-hash
 
 ### Pick a grader backend
 
-The grader runs once per turn and needs an LLM. You have three options — see [Backends](#backends) below for the full picture:
+The grader runs once per turn and needs a model. You have four options — see [Backends](#backends) below for the full picture:
 
 - **Anthropic Haiku 4.5** (default): runs `claude -p` on a second Claude account; point `CONTEXTBUDDY_CLAUDE_CONFIG_DIR` (env or `.env`) at that account's config dir. Billed to that account; quality floor.
 - **Local via Ollama**: install Ollama, pull a model, edit `config.toml`. No API key, no per-grade cost.
 - **OpenAI-compatible local server** (LM Studio, llama.cpp, vLLM, …): edit `config.toml`. No API key required for unauthenticated local servers.
+- **TypeSafe Jev** (System One): set `TYPESAFE_API_KEY`, set `backend = "typesafe"`. One ~0.4 s request per turn, typed probabilities instead of generated JSON, about $0.0002 per turn.
 
 ---
 
@@ -324,6 +325,34 @@ api_key_env = ""            # set to e.g. "OPENROUTER_API_KEY" for hosted gatewa
 
 The plugin sends `response_format: {type: "json_object"}` for schema conformance.
 
+### `typesafe`
+
+Grades with [TypeSafe's](https://docs.typesafe.ai) Jev, a System One model: it returns typed answers and calibrated probabilities rather than generated text, so there is no JSON to parse or repair and a turn grades in about 0.4 s. The grader is `plugin/grader/jev.mjs` (Node 20+, no dependencies).
+
+```toml
+[grader]
+backend = "typesafe"
+model = "jev-1.13.0"
+```
+
+```bash
+export TYPESAFE_API_KEY=...        # in the environment Claude Code inherits
+# optional: export TYPESAFE_BASE_URL=https://api.typesafe.ai
+# optional: export CONTEXTBUDDY_NODE=/path/to/node   # if node is not on the hook's PATH
+```
+
+No other `config.toml` keys: the menubar app's config parser rejects unknown keys and then ignores the whole file, thresholds included, so the backend is configured through the environment.
+
+How it differs from the LLM backends:
+
+- **Questions, not a prompt.** Each rubric dimension is a Score question whose levels are the §6 rubric rows rewritten as standalone situations; intent is a Choice; correction, destructive-operation and guard-bypass are yes/no questions. `scripts/jev-probe.mjs` runs the shipped question set against the README worked examples and your own recent prompts so you can see the numbers before trusting them.
+- **Rationales are the winning level's text.** Jev writes no prose. `summary_update` is a factual one-liner (intent, correction, harm probabilities) assembled in code.
+- **Pollution is counted, not judged.** Re-reads of one file, reads made stale by a later edit, and tool results over 8k characters, from the transcript. Jev does not count reliably, so nothing about context size is asked of it.
+- **Not a prompt, no grade.** An `is_task` question gates the turn: pasted logs, tool output and documents skip grading instead of producing an "attention" the buddy would render.
+- **Extra `signals` field.** Each grade carries a top-level `signals` object (intent distribution, correction, destructive, bypass, severity, threshold probability masses). The app ignores it today; it is there for the next iteration.
+
+What leaves the machine: the session anchor, the first prompt, the last three typed prompts, the current prompt and the last assistant reply, each cut to 2,000 characters. Never tool output, never file contents. Metered: Jev is priced per input token (about 2k tokens a turn at $0.042 per million); output is free.
+
 ### Recommended local models
 
 | Model | Notes |
@@ -388,7 +417,8 @@ By design (§9.6 / §15):
 
 ```bash
 swift test                    # core (Schemas, StateMachine, Storage, Watcher, …)
-bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hooks)
+bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hook job builder) + node grader tests
+node --test Tests/plugin/test_jev_grader.mjs   # typesafe grader alone (no network; fetch is injected)
 ```
 
 ---

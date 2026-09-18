@@ -230,6 +230,85 @@ EOF
   rm -rf "$ws"
 }
 
+# --- typesafe backend (Node grader, jev.mjs) --------------------------------
+
+write_node_mock() {
+  # Fake `node` standing in for the real runtime: asserts invoke.sh handed it
+  # grader/jev.mjs and a JSON job on stdin, then prints the canned grade.
+  # Any other invocation exits 9 so a misrouted dispatch surfaces immediately.
+  local bin="$1"
+  cat > "$bin/node" <<'MOCK'
+#!/usr/bin/env bash
+case "$*" in
+  *grader/jev.mjs*) ;;
+  *) printf 'mock-node: unexpected argv %s\n' "$*" >&2; exit 9 ;;
+esac
+job="$(cat)"
+printf '%s' "$job" | jq -e '.phase' >/dev/null 2>&1 || { printf 'mock-node: stdin is not a job\n' >&2; exit 9; }
+if [ -n "${MOCK_NODE_GATED:-}" ]; then
+  printf 'contextbuddy: task gate p=0.05 — not a prompt, grade skipped\n' >&2
+  exit 0
+fi
+cat "$RESP_DIR/anthropic_response.txt"
+MOCK
+  chmod +x "$bin/node"
+}
+
+typesafe_config() {
+  cat > "$1/cfg/config.toml" <<EOF
+[grader]
+backend = "typesafe"
+model = "jev-1.13.0"
+EOF
+  printf '{"phase":"pre","turn":1,"hook":{"prompt":"p"}}' > "$1/job.json"
+}
+
+test_typesafe_dispatch() {
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  local actual
+  actual="$(RESP_DIR="$ws" PATH="$ws/bin:$PATH" TYPESAFE_API_KEY=k CONTEXTBUDDY_JOB="$ws/job.json" \
+    "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" 2>/dev/null)"
+  assert_emits_expected "typesafe backend dispatch" "$actual"
+  rm -rf "$ws"
+}
+
+test_typesafe_gated_exits_0_empty() {
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  local rc=0 actual
+  actual="$(RESP_DIR="$ws" PATH="$ws/bin:$PATH" TYPESAFE_API_KEY=k CONTEXTBUDDY_JOB="$ws/job.json" MOCK_NODE_GATED=1 \
+    "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" 2>/dev/null)" || rc=$?
+  if [ "$rc" -eq 0 ] && [ -z "$actual" ]; then
+    pass "typesafe task gate exits 0 with empty output (no retry)"
+  else
+    fail "typesafe gated: expected exit 0 + empty, got exit $rc output '$actual'"
+  fi
+  rm -rf "$ws"
+}
+
+test_typesafe_missing_key_exits_5() {
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  local rc=0
+  ( unset TYPESAFE_API_KEY
+    PATH="$ws/bin:$PATH" CONTEXTBUDDY_JOB="$ws/job.json" \
+      "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" >/dev/null 2>&1 ) || rc=$?
+  if [ "$rc" -eq 5 ]; then pass "typesafe without TYPESAFE_API_KEY exits 5"; else fail "typesafe without key: expected exit 5, got $rc"; fi
+  rm -rf "$ws"
+}
+
+test_typesafe_missing_job_exits_2() {
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  local rc=0
+  ( unset CONTEXTBUDDY_JOB
+    PATH="$ws/bin:$PATH" TYPESAFE_API_KEY=k \
+      "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" >/dev/null 2>&1 ) || rc=$?
+  if [ "$rc" -eq 2 ]; then pass "typesafe without CONTEXTBUDDY_JOB exits 2"; else fail "typesafe without job: expected exit 2, got $rc"; fi
+  rm -rf "$ws"
+}
+
 # --- Run -------------------------------------------------------------------
 
 printf 'Running invoke.sh dispatcher tests against %s\n' "$INVOKE"
@@ -239,6 +318,10 @@ test_anthropic_default
 test_anthropic_explicit
 test_unknown_backend_exits_2
 test_anthropic_missing_config_dir_exits_5
+test_typesafe_dispatch
+test_typesafe_gated_exits_0_empty
+test_typesafe_missing_key_exits_5
+test_typesafe_missing_job_exits_2
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
