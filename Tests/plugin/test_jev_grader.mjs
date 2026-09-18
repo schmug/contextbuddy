@@ -42,6 +42,14 @@ test('parseTranscript strips <system-reminder> blocks from typed prompts and dro
   assert.equal(w.firstPrompt, 'Refactor the auth module to use JWT instead of session cookies. Use jose.')
 })
 
+test('parseTranscript skips slash-command records so a /command cannot become the anchor', () => {
+  // Mirrors jev_shadow.py _SKIP_PREFIXES: <command-name>, <local-command-stdout>, <local-command-caveat>.
+  const w = grader.parseTranscript(transcriptText, { windowTurns: 10 })
+  assert.ok(!w.prompts.some(p => p.startsWith('<command-name>')), 'slash command record leaked into prompts')
+  assert.ok(!w.prompts.some(p => p.startsWith('<local-command-stdout>')), 'command stdout record leaked into prompts')
+  assert.equal(w.firstPrompt, 'Refactor the auth module to use JWT instead of session cookies. Use jose.')
+})
+
 test('parseTranscript sums the last assistant usage into tokensUsed', () => {
   const w = grader.parseTranscript(transcriptText, { windowTurns: 3 })
   assert.equal(w.tokensUsed, 60200)
@@ -93,9 +101,17 @@ test('buildState anchors on the first typed prompt when session.md is absent', (
   assert.equal(blank.anchor, first)
 })
 
-test('buildState keeps session.md as the anchor when it exists', () => {
+test('buildState keeps session.md as the anchor when it exists and still sends the first prompt', () => {
   const s = grader.buildState({ anchorYaml: 'goal: x', firstPrompt: 'first', recentPrompts: [], prompt: 'p', lastAssistantText: '', phase: 'pre' })
   assert.equal(s.anchor, 'goal: x')
+  assert.equal(s.initial_prompt, 'first')
+})
+
+test('buildState sends the first prompt once when it is the anchor', () => {
+  const first = 'Refactor the auth module to use JWT instead of session cookies. Use jose.'
+  const s = grader.buildState({ anchorYaml: null, firstPrompt: first, recentPrompts: [], prompt: 'b', lastAssistantText: '', phase: 'pre' })
+  assert.equal(s.anchor, first)
+  assert.equal(s.initial_prompt, '', 'anchor and initial_prompt must not carry the same text twice')
 })
 
 test('buildState clips a long first-prompt anchor to head plus tail within the field cap', () => {
@@ -106,9 +122,12 @@ test('buildState clips a long first-prompt anchor to head plus tail within the f
   assert.ok(s.anchor.endsWith('TTTT'), 'tail kept')
 })
 
-test('buildState substitutes the missing-anchor sentinel only when there is no first prompt either', () => {
-  const s = grader.buildState({ anchorYaml: null, firstPrompt: '', recentPrompts: [], prompt: 'a', lastAssistantText: '', phase: 'pre' })
-  assert.equal(s.anchor, 'session.md not found')
+test('buildState throws when neither session.md nor a first prompt exists (no sentinel anchor is ever sent)', () => {
+  assert.throws(
+    () => grader.buildState({ anchorYaml: null, firstPrompt: '', recentPrompts: [], prompt: 'a', lastAssistantText: '', phase: 'pre' }),
+    /anchor/,
+  )
+  assert.equal(grader.ANCHOR_MISSING, undefined, 'sentinel export must be gone')
 })
 
 test('mapAnswers turns the recorded ex1 response into a §4.1 grade with atomicity as dominant signal', () => {
@@ -200,6 +219,7 @@ test('grade with no session_md anchors on the first typed prompt and does not bl
   const r = await grader.grade(baseJob({ session_md: null, hook: { session_id: 's', transcript_path: transcriptPath, cwd: '/tmp/p', prompt: 'Run the auth tests' } }), { fetchImpl: fakeFetch(ex1, { capture }), env })
   const body = JSON.parse(capture.init.body)
   assert.equal(body.state.anchor, 'Refactor the auth module to use JWT instead of session cookies. Use jose.')
+  assert.equal(body.state.initial_prompt, '', 'first prompt is the anchor; do not send it twice')
   assert.ok(!JSON.stringify(body.state).includes('session.md not found'))
   assert.ok(r.grade.scores.drift.value <= 2, `drift ${r.grade.scores.drift.value}`)
   assert.ok(!r.grade.scores.drift.rationale.startsWith('session.md not found'), r.grade.scores.drift.rationale)

@@ -30,14 +30,19 @@ import { pathToFileURL } from 'node:url'
 // carry only `tool_result` blocks, so the text requirement drops them. `<system-reminder>`
 // blocks the harness prepends to a typed record (worktree notices, hook context) are
 // stripped, as jev_shadow.py does: they are not what the user typed, and as the first
-// record they would otherwise become the anchor (issue #27).
+// record they would otherwise become the anchor (issue #27). Slash-command records
+// (`<command-name>`, `<local-command-stdout>`, `<local-command-caveat>`) are skipped for
+// the same reason, with the same prefix list as jev_shadow.py `_SKIP_PREFIXES`: a session
+// opened with /spec must not get the command wrapper as its anchor.
 const REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g
+const SKIP_PREFIXES = ['<command-name>', '<local-command-stdout>', '<local-command-caveat>']
 function typedPromptText(rec) {
   if (rec.type !== 'user' || rec.isSidechain === true || rec.isMeta === true || rec.isCompactSummary === true) return null
   const c = rec.message?.content
   const raw = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => b.text).join('\n') : ''
   const text = raw.replace(REMINDER_RE, '').trim()
-  return text ? text : null
+  if (!text || SKIP_PREFIXES.some(p => text.startsWith(p))) return null
+  return text
 }
 
 function assistantText(rec) {
@@ -240,14 +245,15 @@ export const QUESTIONS = {
 // is dropped from the recent window rather than shown twice.
 //
 // Anchor: session.md when it exists, else the session's first typed prompt (issue #27; the
-// same fallback jev_shadow.py uses). A literal "not found" anchor made Jev read every prompt
-// as unrelated to the goal. The first prompt is clipped head+tail, not head only, because
-// constraints and exclusions tend to sit at its end. ANCHOR_MISSING is reached only when
-// there is no first prompt either, which grade() never produces.
+// same fallback jev_shadow.py uses). A literal "not found" anchor once made Jev read every
+// prompt as unrelated to the goal, so no sentinel is ever sent: chooseAnchor throws when
+// neither source exists, which grade() cannot reach (it falls back to the graded prompt).
+// The first prompt is clipped head+tail, not head only, because constraints and exclusions
+// tend to sit at its end. When the first prompt is the anchor it is sent once: initial_prompt
+// is blank rather than a second copy (state accuracy falls with redundant text).
 const MAX_FIELD_CHARS = 2000
 const ANCHOR_TAIL_CHARS = 500
 const ELISION = '\n[... elided ...]\n'
-export const ANCHOR_MISSING = 'session.md not found'
 const clip = s => (typeof s === 'string' ? s.slice(0, MAX_FIELD_CHARS) : '')
 const clipHeadTail = s => {
   if (typeof s !== 'string') return ''
@@ -256,12 +262,20 @@ const clipHeadTail = s => {
 }
 const present = s => typeof s === 'string' && s.trim() !== ''
 
+// chooseAnchor({ anchorYaml, firstPrompt }) -> { anchor, source: 'session_md' | 'first_prompt' }
+export function chooseAnchor({ anchorYaml, firstPrompt }) {
+  if (present(anchorYaml)) return { anchor: clip(anchorYaml), source: 'session_md' }
+  if (present(firstPrompt)) return { anchor: clipHeadTail(firstPrompt), source: 'first_prompt' }
+  throw new GraderError(2, 'no anchor: session.md absent and no typed prompt')
+}
+
 export function buildState({ anchorYaml, firstPrompt, recentPrompts, prompt, lastAssistantText, phase }) {
   let recent = Array.isArray(recentPrompts) ? recentPrompts.slice() : []
   if (recent.length && recent[recent.length - 1] === prompt) recent = recent.slice(0, -1)
+  const { anchor, source } = chooseAnchor({ anchorYaml, firstPrompt })
   return {
-    anchor: present(anchorYaml) ? clip(anchorYaml) : present(firstPrompt) ? clipHeadTail(firstPrompt) : ANCHOR_MISSING,
-    initial_prompt: clip(firstPrompt),
+    anchor,
+    initial_prompt: source === 'first_prompt' ? '' : clip(firstPrompt),
     recent_user_prompts: recent.map(clip),
     prompt: clip(prompt),
     last_assistant_message: clip(lastAssistantText),
@@ -448,7 +462,9 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
   const g = mapAnswers({
     answers, phase, turn: job.turn, timestamp: job.timestamp,
     tokensUsed: window.tokensUsed, tokensLimit: job.tokens_limit || 200000,
-    pollution, thresholds, anchorFromPrompt: !present(job.session_md), model: response.model || job.model,
+    pollution, thresholds,
+    anchorFromPrompt: chooseAnchor({ anchorYaml: job.session_md, firstPrompt: window.firstPrompt || prompt }).source === 'first_prompt',
+    model: response.model || job.model,
   })
   return { gated: false, grade: g, usage: response.usage }
 }
