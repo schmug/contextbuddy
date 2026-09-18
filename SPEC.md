@@ -692,7 +692,7 @@ When popover is focused:
 **`hooks/user_prompt_submit.sh`**:
 - Resolves the project hash from `$PWD`.
 - Ensures the session directory exists.
-- Determines the current turn number (read max from `turns/`, increment).
+- Determines the current turn number: advances `turns/.counter` under the write lock (seeded from the max `turns/NNN-*.json`), so a skipped grade still consumes a number.
 - Assembles grader input: session.md, latest prompt (from hook env), last 3 turns verbatim, prior summary from history.jsonl tail.
 - Calls Anthropic Messages API with Haiku model, grader system prompt, assembled input.
 - Parses response JSON. Validates conforms to schema §4.1. On parse failure, log error and skip — do not crash the user's session.

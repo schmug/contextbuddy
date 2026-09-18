@@ -67,27 +67,38 @@ ensure_session_dir() {
 }
 
 # next_turn_number <hash>
-# Reads zero-padded NNN-{pre,post}.json filenames in turns/ and returns max+1.
-# Returns 1 if turns/ is empty.
+# Allocates the next pre-phase turn number and returns it. Advances a persistent
+# counter (turns/.counter, plain integer = last number handed out) so a turn whose
+# Haiku grade is skipped still consumes a number and later graders (the Jev shadow
+# row) get distinct turns (issue #14). The counter is seeded from the largest
+# NNN-{pre,post}.json already in turns/, so sessions graded before the counter
+# existed keep numbering past their files instead of overwriting them.
+# Side effect: writes turns/.counter. Caller must hold the "write" lock.
 next_turn_number() {
   local hash="$1"
   local dir
   dir="$(turns_dir "$hash")"
-  if [ ! -d "$dir" ]; then
-    printf '1'
-    return
-  fi
-  local max
-  max=$(ls -1 "$dir" 2>/dev/null \
+  local counter_file="$dir/.counter"
+  local file_max counter
+  file_max=$(ls -1 "$dir" 2>/dev/null \
     | grep -E '^[0-9]{3}-(pre|post)\.json$' \
     | cut -c1-3 \
     | sort -n \
     | tail -1)
-  if [ -z "$max" ]; then
-    printf '1'
-  else
-    printf '%d' "$((10#$max + 1))"
+  file_max=$((10#${file_max:-0}))
+  counter=""
+  if [ -f "$counter_file" ]; then
+    counter=$(tr -cd '0-9' < "$counter_file")
   fi
+  counter=$((10#${counter:-0}))
+  local next
+  if [ "$file_max" -gt "$counter" ]; then
+    next=$((file_max + 1))
+  else
+    next=$((counter + 1))
+  fi
+  printf '%d\n' "$next" | atomic_write "$counter_file"
+  printf '%d' "$next"
 }
 
 # acquire_lock <hash> <name>
