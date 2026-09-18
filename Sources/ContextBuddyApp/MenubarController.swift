@@ -55,7 +55,17 @@ final class MenubarController: NSObject, NSMenuDelegate {
         popover.behavior = .transient
         popover.animates = true
         popover.contentSize = NSSize(width: 320, height: 200)
-        popover.contentViewController = NSHostingController(rootView: makePopoverView())
+        popover.contentViewController = makeHostingController()
+    }
+
+    // sizingOptions: .preferredContentSize makes NSPopover follow SwiftUI's
+    // own fitting height instead of the initial contentSize above. Without it
+    // the popover cannot grow when the "Why this grade" disclosure expands
+    // (roughly 240pt -> 346pt), and the signals section is clipped.
+    private func makeHostingController() -> NSHostingController<some View> {
+        let controller = NSHostingController(rootView: makePopoverView())
+        controller.sizingOptions = [.preferredContentSize]
+        return controller
     }
 
     private func startObserving() {
@@ -83,7 +93,7 @@ final class MenubarController: NSObject, NSMenuDelegate {
     }
 
     private func updatePopover() {
-        popover.contentViewController = NSHostingController(rootView: makePopoverView())
+        popover.contentViewController = makeHostingController()
     }
 
     private func makePopoverView() -> some View {

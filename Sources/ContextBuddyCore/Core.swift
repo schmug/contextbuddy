@@ -20,19 +20,26 @@ public actor BuddyCore {
         public let projectPath: String?
         public let lastGrade: Grade?
         public let pinnedHash: String?
+        // The popover colours each score meter by its distance from that
+        // dimension's own attention threshold, so the live thresholds have to
+        // reach the view. `BuddyCore.config` is private to the actor and
+        // hot-reloads on mtime change; Snapshot is the only channel out.
+        public let thresholds: Config.Thresholds
 
         public init(
             state: BuddyState,
             projectHash: String?,
             projectPath: String? = nil,
             lastGrade: Grade?,
-            pinnedHash: String?
+            pinnedHash: String?,
+            thresholds: Config.Thresholds = Config.defaults.thresholds
         ) {
             self.state = state
             self.projectHash = projectHash
             self.projectPath = projectPath
             self.lastGrade = lastGrade
             self.pinnedHash = pinnedHash
+            self.thresholds = thresholds
         }
 
         // Name for the popover's project footer row; nil when unknown.
@@ -377,7 +384,8 @@ public actor BuddyCore {
             projectHash: currentHash,
             projectPath: projectPath,
             lastGrade: lastGrade,
-            pinnedHash: pinnedHash
+            pinnedHash: pinnedHash,
+            thresholds: config.thresholds
         )
     }
 

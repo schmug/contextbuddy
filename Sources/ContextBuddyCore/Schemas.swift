@@ -17,6 +17,9 @@ public struct Grade: Codable, Equatable, Sendable {
     public var tokensLimit: Int
     public var dominantSignal: DominantSignal?
     public var summaryUpdate: String
+    // Optional: only the typesafe/Jev backend emits it. Absent for the
+    // anthropic, ollama and openai_compatible backends.
+    public var signals: Signals?
 
     public init(
         schemaVersion: Int = 1,
@@ -27,7 +30,8 @@ public struct Grade: Codable, Equatable, Sendable {
         tokensUsed: Int,
         tokensLimit: Int,
         dominantSignal: DominantSignal?,
-        summaryUpdate: String
+        summaryUpdate: String,
+        signals: Signals? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.phase = phase
@@ -38,6 +42,138 @@ public struct Grade: Codable, Equatable, Sendable {
         self.tokensLimit = tokensLimit
         self.dominantSignal = dominantSignal
         self.summaryUpdate = summaryUpdate
+        self.signals = signals
+    }
+}
+
+// MARK: - Signals
+//
+// The typesafe backend's per-turn judgment block. Every field is optional:
+// the block itself is backend-specific, and Jev's schema may gain fields
+// without this app knowing about them (§13 — warn, do not error).
+//
+// Before this existed the block was decoded and silently discarded, so the
+// popover had no access to intent, severity or the harm probabilities.
+
+public struct Signals: Codable, Equatable, Sendable {
+    public var backend: String?
+    public var model: String?
+    public var isTask: Double?
+    public var taskGated: Bool?
+    public var intent: Intent?
+    public var isCorrection: Double?
+    public var destructive: Double?
+    public var bypass: Double?
+    public var severity: Double?
+    public var masses: Masses?
+
+    public init(
+        backend: String? = nil,
+        model: String? = nil,
+        isTask: Double? = nil,
+        taskGated: Bool? = nil,
+        intent: Intent? = nil,
+        isCorrection: Double? = nil,
+        destructive: Double? = nil,
+        bypass: Double? = nil,
+        severity: Double? = nil,
+        masses: Masses? = nil
+    ) {
+        self.backend = backend
+        self.model = model
+        self.isTask = isTask
+        self.taskGated = taskGated
+        self.intent = intent
+        self.isCorrection = isCorrection
+        self.destructive = destructive
+        self.bypass = bypass
+        self.severity = severity
+        self.masses = masses
+    }
+
+    public struct Intent: Codable, Equatable, Sendable {
+        public var choice: String?
+        // NOTE: .convertFromSnakeCase does NOT reach these keys — the strategy
+        // only rewrites keys backed by a CodingKey, so `fix_bug` arrives
+        // verbatim. `Intent.humanize` still handles both spellings so a future
+        // decoder change degrades to cosmetics. Pinned by
+        // SignalsTests.testProbabilityKeysKeepTheirRawSnakeCaseSpelling.
+        public var probabilities: [String: Double]?
+        public var confidence: Double?
+
+        public init(choice: String? = nil, probabilities: [String: Double]? = nil, confidence: Double? = nil) {
+            self.choice = choice
+            self.probabilities = probabilities
+            self.confidence = confidence
+        }
+
+        // Highest-probability intents first, zero-probability entries dropped
+        // (a 0% row is noise in a 320pt popover). Ties break on label so the
+        // popover does not reshuffle between identical grades.
+        public func topIntents(limit: Int) -> [IntentProbability] {
+            guard let probabilities else { return [] }
+            return probabilities
+                .filter { $0.value > 0 }
+                .map { IntentProbability(label: Intent.humanize($0.key), probability: $0.value) }
+                .sorted { lhs, rhs in
+                    lhs.probability == rhs.probability
+                        ? lhs.label < rhs.label
+                        : lhs.probability > rhs.probability
+                }
+                .prefix(limit)
+                .map { $0 }
+        }
+
+        // The humanized form of `choice`, for display next to topIntents.
+        public var choiceLabel: String? {
+            choice.map(Intent.humanize)
+        }
+
+        // "fixBug" / "fix_bug" -> "fix bug".
+        public static func humanize(_ key: String) -> String {
+            var out = ""
+            for character in key.replacingOccurrences(of: "_", with: " ") {
+                if character.isUppercase {
+                    out.append(" ")
+                    out.append(Character(character.lowercased()))
+                } else {
+                    out.append(character)
+                }
+            }
+            return out
+        }
+    }
+
+    public struct IntentProbability: Equatable, Sendable {
+        public let label: String
+        public let probability: Double
+
+        public init(label: String, probability: Double) {
+            self.label = label
+            self.probability = probability
+        }
+    }
+
+    // Jev's belief mass per attention dimension. Typed rather than a
+    // dictionary so snake_case conversion lands on a known property instead
+    // of an unpredictable key spelling.
+    public struct Masses: Codable, Equatable, Sendable {
+        public var confidenceLow: Double?
+        public var atomicityLow: Double?
+        public var driftHigh: Double?
+        public var pollutionHigh: Double?
+
+        public init(
+            confidenceLow: Double? = nil,
+            atomicityLow: Double? = nil,
+            driftHigh: Double? = nil,
+            pollutionHigh: Double? = nil
+        ) {
+            self.confidenceLow = confidenceLow
+            self.atomicityLow = atomicityLow
+            self.driftHigh = driftHigh
+            self.pollutionHigh = pollutionHigh
+        }
     }
 }
 
