@@ -1,0 +1,33 @@
+{
+  "model": "jev-1.13.0",
+  "answers": {
+    "specificity": {
+      "type": "score",
+      "score": 2.35,
+      "confidence": 0.58,
+      "legend": {"0": "l0", "1": "l1", "2": "l2", "3": "l3", "4": "l4"},
+      "probabilities": {"0": 0.02, "1": 0.13, "2": 0.45, "3": 0.28, "4": 0.12}
+    },
+    "atomicity": {
+      "type": "score",
+      "score": 1.05,
+      "confidence": 0.71,
+      "legend": {"0": "l0", "1": "l1", "2": "l2", "3": "l3", "4": "l4"},
+      "probabilities": {"0": 0.20, "1": 0.60, "2": 0.15, "3": 0.04, "4": 0.01}
+    },
+    "drift": {
+      "type": "score",
+      "score": 0.62,
+      "confidence": 0.66,
+      "legend": {"0": "l0", "1": "l1", "2": "l2", "3": "l3", "4": "l4"},
+      "probabilities": {"0": 0.50, "1": 0.40, "2": 0.08, "3": 0.02, "4": 0.00}
+    },
+    "intent": {
+      "type": "choice",
+      "choice": "debugging",
+      "confidence": 0.62,
+      "probabilities": {"continuing": 0.30, "pivoting": 0.03, "debugging": 0.61, "exploring": 0.02, "wrapping_up": 0.04}
+    }
+  },
+  "usage": {"input_tokens": 1412, "output_tokens": 0}
+}
