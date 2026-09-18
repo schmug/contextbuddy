@@ -21,9 +21,49 @@ struct PopoverView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             actionRow
+            Divider()
+            projectFooterRow
         }
         .padding(12)
         .frame(width: 320)
+    }
+
+    // Project footer row (§9.3). Names the project the scores belong to, so a
+    // yellow `attention` with several projects graded at once is attributable at
+    // a glance. Not to be confused with plugin/statusline.sh, which is Claude
+    // Code's status line and already runs in the project's own $PWD.
+    //
+    // Falls back to the hash prefix when the session dir has no meta.json —
+    // those dirs predate the hook that writes it and the hash is one-way, so a
+    // fragment of the digest is genuinely all that is known.
+    private var projectFooterRow: some View {
+        HStack(spacing: 4) {
+            Text("📁")
+                .font(.system(size: 11))
+            Text(projectLabel)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+        }
+        .help(projectTooltip)
+    }
+
+    private var projectLabel: String {
+        if let name = snapshot.projectName, !name.isEmpty { return name }
+        if let hash = snapshot.projectHash { return hash.prefix(6) + "…" }
+        return "no session"
+    }
+
+    // The full path stays out of the row itself — it leaks /Users/<username>/…
+    // into a screenshot-able surface and will not fit 320pt.
+    private var projectTooltip: String {
+        if let path = snapshot.projectPath { return path }
+        if let hash = snapshot.projectHash {
+            return "Project path unknown (session \(hash)); it is recorded on the next graded turn."
+        }
+        return "No active session."
     }
 
     private var header: some View {

@@ -14,11 +14,38 @@ public struct SessionRef: Equatable, Sendable {
     public let projectHash: String
     public let directory: URL
     public let lastUpdated: Date?
+    // Absolute project path from meta.json (§4.9). nil for session dirs the
+    // plugin wrote before meta.json existed — the hash is one-way, so there is
+    // nothing to fall back on but the hash itself.
+    public let projectPath: String?
 
-    public init(projectHash: String, directory: URL, lastUpdated: Date?) {
+    public init(
+        projectHash: String,
+        directory: URL,
+        lastUpdated: Date?,
+        projectPath: String? = nil
+    ) {
         self.projectHash = projectHash
         self.directory = directory
         self.lastUpdated = lastUpdated
+        self.projectPath = projectPath
+    }
+
+    // Display name for the popover's project footer row.
+    public var projectName: String? {
+        projectPath.flatMap { SessionDiscovery.projectName(forPath: $0) }
+    }
+}
+
+// meta.json — project identity for a session dir, written by the plugin hooks
+// (SPEC.md §4.9). Deliberately separate from Grade/last.json: project identity
+// is session metadata, not a graded score, and it must be correct from turn one
+// rather than only after the first successful grade.
+struct SessionMeta: Decodable {
+    let projectPath: String
+
+    enum CodingKeys: String, CodingKey {
+        case projectPath = "project_path"
     }
 }
 
@@ -35,6 +62,32 @@ public struct SessionDiscovery: Sendable {
         let digest = SHA256.hash(data: data)
         let hex = digest.map { String(format: "%02x", $0) }.joined()
         return String(hex.prefix(12))
+    }
+
+    // Read the recorded project path out of a session directory's meta.json.
+    // Returns nil when the file is absent or unreadable — every caller falls
+    // back to the project hash rather than showing nothing.
+    public static func projectPath(inSessionDirectory directory: URL) -> String? {
+        let meta = directory.appendingPathComponent("meta.json")
+        guard let data = try? Data(contentsOf: meta),
+              let decoded = try? JSONDecoder().decode(SessionMeta.self, from: data),
+              !decoded.projectPath.isEmpty
+        else { return nil }
+        return decoded.projectPath
+    }
+
+    // Last path component of an absolute project path, e.g. "contextbuddy".
+    // Deliberately not the full path: it would leak /Users/<username>/… into a
+    // screenshot-able UI and would not fit the 320pt popover.
+    //
+    // Deliberately not smarter than the last component either. In a git worktree
+    // this yields the worktree directory name (e.g. "objective-cerf-9a0580"),
+    // not the repo name — walking up to the git root is a follow-up, not this.
+    public static func projectName(forPath path: String) -> String? {
+        guard !path.isEmpty else { return nil }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        guard !name.isEmpty, name != "/" else { return nil }
+        return name
     }
 
     public static var defaultRoot: URL {
@@ -58,7 +111,12 @@ public struct SessionDiscovery: Sendable {
             let hash = entry.lastPathComponent
             let lastJson = entry.appendingPathComponent("last.json")
             let mtime = (try? lastJson.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
-            return SessionRef(projectHash: hash, directory: entry, lastUpdated: mtime)
+            return SessionRef(
+                projectHash: hash,
+                directory: entry,
+                lastUpdated: mtime,
+                projectPath: Self.projectPath(inSessionDirectory: entry)
+            )
         }
         return refs.sorted { lhs, rhs in
             switch (lhs.lastUpdated, rhs.lastUpdated) {

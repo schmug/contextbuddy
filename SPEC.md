@@ -44,6 +44,7 @@ The two halves communicate exclusively through the file system. The plugin owns 
 ┌────────────────────────────┐
 │  ~/.claude/inspector/       │
 │  sessions/<project-hash>/   │
+│    meta.json                │
 │    session.md               │
 │    last.json                │
 │    history.jsonl            │
@@ -286,6 +287,25 @@ animations_enabled = true
 ```
 
 The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required.
+
+### 4.9 `meta.json`
+
+Project identity for the session directory. The project hash is one-way, so this file is the only record of which project a session directory belongs to. Written atomically by both hooks on every turn — not only the first, so directories created before this file existed self-heal on their next graded turn.
+
+```json
+{
+  "schema_version": 1,
+  "project_path": "/Users/cory/dev/contextbuddy"
+}
+```
+
+**Field rules**:
+- `schema_version` — always `1` in v1.
+- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. When path canonicalization lands (issue #4), the canonical string is what gets recorded — there is no second normalization step here.
+
+Deliberately *not* a field on `last.json`: project identity is session metadata rather than a graded score, `last.json` is version-gated as the grader's validated output schema (§4.1), and the project name must be correct from turn one rather than only after the first successful grade.
+
+The buddy treats this file as optional. When it is absent or unparseable, the popover's project footer row falls back to the project-hash prefix (§9.3).
 
 ---
 
@@ -654,6 +674,8 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
   - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`)
   - Empty line
   - Action row: `[Ack]  [Mute "<signal>"]  [Open inspector]` (Mute button hidden in celebrate/heart states)
+  - Horizontal rule
+  - Project footer row, pinned to the bottom: `📁 <project name>` — the last path component of `project_path` from `meta.json` (§4.9), naming the project the scores belong to. Truncated in the middle, never wrapped. The full absolute path is the row's tooltip only, never rendered inline (it leaks `/Users/<username>/…` into a screenshot-able surface and does not fit 320pt). Falls back to the project-hash prefix when `meta.json` is absent. Distinct from `plugin/statusline.sh`, which is Claude Code's status line (§10.2) and needs no project label.
 - Token economics row appears *only* when `tokens_used / tokens_limit > 0.70`. Format: `⚡ 142k / 200k (71%)`. Placed between scores and rationale.
 
 ### 9.4 Right-click menu
@@ -692,6 +714,7 @@ When popover is focused:
 **`hooks/user_prompt_submit.sh`**:
 - Resolves the project hash from `$PWD`.
 - Ensures the session directory exists.
+- Records `meta.json` (§4.9) with that same `$PWD`, atomically. Failure is logged and skipped like any other hook error (§13) — the buddy falls back to the hash.
 - Determines the current turn number: advances `turns/.counter` under the write lock (seeded from the max `turns/NNN-*.json`), so a skipped grade still consumes a number.
 - Assembles grader input: session.md, latest prompt (from hook env), last 3 turns verbatim, prior summary from history.jsonl tail.
 - Calls Anthropic Messages API with Haiku model, grader system prompt, assembled input.
@@ -702,7 +725,7 @@ When popover is focused:
 - Appends to `history.jsonl`.
 - If state would transition to `attention` or `dizzy`, appends a section to `suggestions.md`.
 
-**`hooks/stop.sh`**: identical pipeline but with phase=`post`. Additionally:
+**`hooks/stop.sh`**: identical pipeline but with phase=`post` (including the `meta.json` write, since a Stop can be the first hook to create the session directory). Additionally:
 - Reads the agent's tool calls from the hook input to extract the list of files edited.
 - Maintains a rolling edit history (last 5 turns × edited files) in a small file under `sessions/<hash>/edits.jsonl`.
 - Computes loop detection per §5.4 and overrides `dominant_signal` to `"loop"` if triggered.
