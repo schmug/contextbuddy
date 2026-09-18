@@ -106,9 +106,11 @@ case "$BACKEND" in
     ;;
   typesafe)
     # Node grader (grader/jev.mjs). Needs the job file the hooks write
-    # (CONTEXTBUDDY_JOB), a Node 20+ runtime, and TYPESAFE_API_KEY. No new
-    # config.toml keys: the Swift config parser rejects unknown keys and
-    # would then drop the whole file, thresholds included.
+    # (CONTEXTBUDDY_JOB), a Node 20+ runtime, and TYPESAFE_API_KEY from the
+    # environment or a .env found by lib/dotenv.sh (hooks fired from the desktop
+    # app see no shell exports; same route as CONTEXTBUDDY_CLAUDE_CONFIG_DIR). No
+    # new config.toml keys: the Swift config parser rejects unknown keys and
+    # would then drop the whole file, thresholds included (issue #8).
     NODE_BIN="${CONTEXTBUDDY_NODE:-}"
     if [ -z "$NODE_BIN" ]; then
       NODE_BIN="$(command -v node 2>/dev/null || true)"
@@ -124,9 +126,11 @@ case "$BACKEND" in
       printf 'contextbuddy: CONTEXTBUDDY_JOB not set or missing; typesafe backend needs the hook job file\n' >&2
       exit 2
     fi
-    if [ -z "${TYPESAFE_API_KEY:-}" ]; then
+    TYPESAFE_KEY="${TYPESAFE_API_KEY:-}"
+    [ -n "$TYPESAFE_KEY" ] || TYPESAFE_KEY="$(dotenv_value TYPESAFE_API_KEY || true)"
+    if [ -z "$TYPESAFE_KEY" ]; then
       printf 'contextbuddy: TYPESAFE_API_KEY not set — grader skipped.\n' >&2
-      printf 'contextbuddy: export it in the environment Claude Code inherits, or switch [grader].backend.\n' >&2
+      printf 'contextbuddy: export it in the environment Claude Code inherits, put it in a .env (see lib/dotenv.sh), or switch [grader].backend.\n' >&2
       exit 5
     fi
     ;;
@@ -149,7 +153,7 @@ trap 'rm -f "$CHILD_ERR"' EXIT
 # stderr), so it must not be retried or reported as an empty-output failure.
 # Non-zero exits carry jev.mjs's own contextbuddy: line and code (2/3/4/5).
 if [ "$BACKEND" = "typesafe" ]; then
-  OUTPUT="$("$NODE_BIN" "$PLUGIN_ROOT/grader/jev.mjs" < "$CONTEXTBUDDY_JOB")"
+  OUTPUT="$(TYPESAFE_API_KEY="$TYPESAFE_KEY" "$NODE_BIN" "$PLUGIN_ROOT/grader/jev.mjs" < "$CONTEXTBUDDY_JOB")"
   rc=$?
   [ "$rc" -ne 0 ] && exit "$rc"
   [ -z "$OUTPUT" ] && exit 0

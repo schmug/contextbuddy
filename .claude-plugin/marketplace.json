@@ -1,0 +1,14 @@
+{
+  "name": "contextbuddy",
+  "owner": {
+    "name": "schmug"
+  },
+  "description": "ContextBuddy: the Claude Code plugin half of the ContextBuddy menubar app (hooks, grader, slash commands, status line).",
+  "plugins": [
+    {
+      "name": "contextbuddy",
+      "source": "./plugin",
+      "description": "Grades prompt and context quality during Claude Code sessions and surfaces results through an ambient macOS menubar buddy."
+    }
+  ]
+}

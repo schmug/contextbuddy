@@ -34,12 +34,14 @@ For local development (loads the plugin only for the session you launch):
 claude --plugin-dir ./plugin/
 ```
 
-For a persistent install, add this repo as a marketplace and install via the manifest at `plugin/.claude-plugin/plugin.json`:
+For a persistent install (the desktop app has no `--plugin-dir`), add this repo as a marketplace (`.claude-plugin/marketplace.json` at the repo root lists the plugin at `./plugin`) and install from it:
 
 ```bash
-claude plugin marketplace add ./plugin
-claude plugin install contextbuddy
+claude plugin marketplace add /path/to/contextbuddy   # or: schmug/contextbuddy
+claude plugin install contextbuddy@contextbuddy
 ```
+
+A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way.
 
 To verify the plugin manifest:
 
@@ -336,7 +338,11 @@ model = "jev-1.13.0"
 ```
 
 ```bash
-export TYPESAFE_API_KEY=...        # in the environment Claude Code inherits
+export TYPESAFE_API_KEY=...        # in the environment Claude Code inherits,
+                                   # or a TYPESAFE_API_KEY= line in a .env in the
+                                   # project, worktree root, or main checkout
+                                   # (plugin/lib/dotenv.sh; the desktop app's hooks
+                                   # see no shell exports, so .env is the route there)
 # optional: export TYPESAFE_BASE_URL=https://api.typesafe.ai
 # optional: export CONTEXTBUDDY_NODE=/path/to/node   # if node is not on the hook's PATH
 ```
