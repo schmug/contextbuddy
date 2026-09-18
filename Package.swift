@@ -21,6 +21,11 @@ let package = Package(
             path: "Sources/ContextBuddyApp"
         ),
         .testTarget(
+            name: "ContextBuddyAppTests",
+            dependencies: ["ContextBuddyApp", "ContextBuddyCore"],
+            path: "Tests/ContextBuddyAppTests"
+        ),
+        .testTarget(
             name: "ContextBuddyCoreTests",
             dependencies: ["ContextBuddyCore"],
             path: "Tests/ContextBuddyCoreTests",

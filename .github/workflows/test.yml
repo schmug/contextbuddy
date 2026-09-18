@@ -53,7 +53,7 @@ jobs:
         with:
           path: .build
           # Package.resolved is gitignored, so key on the manifest plus sources.
-          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/ContextBuddyCoreTests/**') }}
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/ContextBuddyAppTests/**', 'Tests/ContextBuddyCoreTests/**') }}
           restore-keys: |
             swiftpm-${{ runner.os }}-
 
