@@ -168,11 +168,45 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(cfg.thresholds.loopEditsInWindow, 3)
         XCTAssertEqual(cfg.thresholds.loopWindowTurns, 3)
         XCTAssertEqual(cfg.thresholds.contextPressurePct, 85)
+        XCTAssertEqual(cfg.grader.backend, "anthropic")
         XCTAssertEqual(cfg.grader.model, "claude-haiku-4-5-20251001")
         XCTAssertEqual(cfg.grader.slidingWindowTurns, 3)
         XCTAssertEqual(cfg.grader.inspectModel, "claude-sonnet-4-6")
+        XCTAssertEqual(cfg.grader.ollama.endpoint, "http://localhost:11434")
+        XCTAssertEqual(cfg.grader.openaiCompatible.endpoint, "http://localhost:1234/v1")
+        XCTAssertEqual(cfg.grader.openaiCompatible.apiKeyEnv, "")
         XCTAssertTrue(cfg.ui.animationsEnabled)
         XCTAssertEqual(cfg.ui.tokenRowPct, 70)
+    }
+
+    func testConfigParsesOllamaBackend() throws {
+        let source = """
+        [grader]
+        backend = "ollama"
+        model = "qwen2.5:14b-instruct"
+
+        [grader.ollama]
+        endpoint = "http://192.168.1.5:11434"
+        """
+        let parsed = try Config.parse(source)
+        XCTAssertEqual(parsed.grader.backend, "ollama")
+        XCTAssertEqual(parsed.grader.model, "qwen2.5:14b-instruct")
+        XCTAssertEqual(parsed.grader.ollama.endpoint, "http://192.168.1.5:11434")
+    }
+
+    func testConfigParsesOpenAICompatibleBackend() throws {
+        let source = """
+        [grader]
+        backend = "openai_compatible"
+
+        [grader.openai_compatible]
+        endpoint = "http://localhost:8000/v1"
+        api_key_env = "MY_LOCAL_KEY"
+        """
+        let parsed = try Config.parse(source)
+        XCTAssertEqual(parsed.grader.backend, "openai_compatible")
+        XCTAssertEqual(parsed.grader.openaiCompatible.endpoint, "http://localhost:8000/v1")
+        XCTAssertEqual(parsed.grader.openaiCompatible.apiKeyEnv, "MY_LOCAL_KEY")
     }
 
     func testConfigParsesDefaultFile() throws {

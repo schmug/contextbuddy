@@ -37,6 +37,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/transcript.sh"
 # shellcheck source=../lib/dotenv.sh
 . "$PLUGIN_ROOT/lib/dotenv.sh"
+# shellcheck source=../lib/config.sh
+. "$PLUGIN_ROOT/lib/config.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -104,14 +106,9 @@ spawn_jev_shadow || true
 
 # Read config; fall back to defaults silently per §13.
 CONFIG_PATH="$(config_path)"
-GRADER_MODEL="claude-haiku-4-5-20251001"
-CONTEXT_PRESSURE_PCT="85"
-if [ -f "$CONFIG_PATH" ]; then
-  GRADER_MODEL="$(grep -E '^model[[:space:]]*=' "$CONFIG_PATH" | head -1 | sed -E 's/.*=[[:space:]]*"([^"]+)".*/\1/' || true)"
-  GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
-  CONTEXT_PRESSURE_PCT="$(grep -E '^context_pressure_pct[[:space:]]*=' "$CONFIG_PATH" | head -1 | sed -E 's/.*=[[:space:]]*([0-9]+).*/\1/' || true)"
-  CONTEXT_PRESSURE_PCT="${CONTEXT_PRESSURE_PCT:-85}"
-fi
+GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
+GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
+CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 
 # Assemble grader input bundle.
 INPUT_FILE="$(mktemp)"
@@ -136,7 +133,8 @@ trap 'rm -f "$INPUT_FILE"; release_lock "$PROJECT_HASH" "write"' EXIT
 GRADE_JSON="$("$PLUGIN_ROOT/grader/invoke.sh" \
   "$PLUGIN_ROOT/grader/system_prompt.md" \
   "$INPUT_FILE" \
-  "$GRADER_MODEL" 2>/dev/null || true)"
+  "$GRADER_MODEL" \
+  "$CONFIG_PATH" 2>/dev/null || true)"
 
 if [ -z "$GRADE_JSON" ]; then
   log_err "grader returned no output for turn $TURN; skipping"

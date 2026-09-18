@@ -1,0 +1,10 @@
+{
+  "name": "contextbuddy",
+  "version": "1.0.0",
+  "description": "Grades prompt and context quality during Claude Code sessions and surfaces results through an ambient macOS menubar buddy.",
+  "author": {
+    "name": "ContextBuddy contributors",
+    "email": "noreply@contextbuddy.dev"
+  },
+  "license": "MIT"
+}

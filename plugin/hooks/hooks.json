@@ -1,0 +1,25 @@
+{
+  "description": "ContextBuddy grader hooks — fire on every UserPromptSubmit (pre-phase) and Stop (post-phase). Each invocation calls the grader backend (anthropic/ollama/openai_compatible per ~/.claude/inspector/config.toml) and writes JSON output the menubar app reads via FSEvents.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/user_prompt_submit.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/stop.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
