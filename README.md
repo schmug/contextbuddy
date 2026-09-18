@@ -1,5 +1,7 @@
 # ContextBuddy
 
+[![test](https://github.com/schmug/contextbuddy/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/schmug/contextbuddy/actions/workflows/test.yml)
+
 > A peripheral macOS menubar buddy that grades the quality of your Claude Code prompts and turns — so you can become a better prompt-writer over time.
 
 ContextBuddy has two halves:
