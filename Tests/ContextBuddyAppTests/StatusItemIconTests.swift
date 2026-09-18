@@ -16,7 +16,7 @@ import ContextBuddyCore
 // over a menu bar background, and measures it.
 //
 // Needs an NSApplication: `bitmapImageRepForCachingDisplay` draws through
-// AppKit, so `setUp` creates one.
+// AppKit, so `makeButton` bootstraps one.
 @MainActor
 final class StatusItemIconTests: XCTestCase {
 
@@ -30,15 +30,6 @@ final class StatusItemIconTests: XCTestCase {
     private static let menuBars: [(NSAppearance.Name, Double)] = [
         (.darkAqua, darkMenuBar), (.aqua, lightMenuBar)
     ]
-
-    override func setUp() {
-        super.setUp()
-        // `swift test` runs under `xctest`, which has no NSApplication of its
-        // own, and `bitmapImageRepForCachingDisplay` draws through AppKit.
-        // Touching `NSApplication.shared` creates one; `.prohibited` keeps the
-        // process out of the Dock and off the activation path. Idempotent.
-        NSApplication.shared.setActivationPolicy(.prohibited)
-    }
 
     // MARK: - Contrast floors
 
@@ -159,7 +150,22 @@ final class StatusItemIconTests: XCTestCase {
 
 extension StatusItemIconTests {
 
+    // `swift test` runs under `xctest`, which has no NSApplication of its own,
+    // and `bitmapImageRepForCachingDisplay` draws through AppKit. Touching
+    // `NSApplication.shared` creates one; `.prohibited` keeps the process out
+    // of the Dock and off the activation path. A static `let` runs once.
+    //
+    // Deliberately not an `override func setUp()`: that override inherits
+    // XCTestCase's nonisolated context rather than this class's @MainActor
+    // annotation on Swift 6.0, so touching NSApplication from it fails to
+    // compile there while building fine on newer toolchains.
+    @MainActor
+    static let bootstrapAppKit: Void = {
+        _ = NSApplication.shared.setActivationPolicy(.prohibited)
+    }()
+
     func makeButton(appearance: NSAppearance.Name) -> NSButton {
+        _ = Self.bootstrapAppKit
         let button = NSButton(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
         button.appearance = NSAppearance(named: appearance)
         button.isBordered = false
