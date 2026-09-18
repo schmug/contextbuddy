@@ -37,6 +37,55 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(snap.state, .idle, "celebrate-eligible grade with no prior history → idle")
     }
 
+    func testSnapshotCarriesProjectNameFromMetaJson() async throws {
+        // The popover's project footer row reads Snapshot, so the name has to
+        // survive the trip from the session dir through BuddyCore (issue #38).
+        let path = "/Users/cory/dev/contextbuddy"
+        let hash = SessionDiscovery.projectHash(for: path)
+        try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
+        try writeMeta(hash: hash, projectPath: path)
+
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectPath, path)
+        XCTAssertEqual(snap.projectName, "contextbuddy")
+    }
+
+    func testPinningAnotherSessionSwitchesTheProjectName() async throws {
+        // Acceptance for issue #38: the footer row must follow the active
+        // session, not stay on whichever one the popover opened with.
+        let mruPath = "/Users/cory/dev/dmarcheck"
+        let pinnedPath = "/Users/cory/dev/contextbuddy"
+        let mruHash = SessionDiscovery.projectHash(for: mruPath)
+        let pinnedHash = SessionDiscovery.projectHash(for: pinnedPath)
+        try writeFixtureGrade(hash: mruHash, fixture: "example1_pre_turn14", mtimeAge: 5)
+        try writeFixtureGrade(hash: pinnedHash, fixture: "example2_post_turn22", mtimeAge: 100)
+        try writeMeta(hash: mruHash, projectPath: mruPath)
+        try writeMeta(hash: pinnedHash, projectPath: pinnedPath)
+
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        var snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectName, "dmarcheck", "MRU names its own project")
+
+        await core.pinSession(pinnedHash)
+        snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectName, "contextbuddy", "pin switches the named project")
+
+        await core.pinSession(nil)
+        snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectName, "dmarcheck", "unpin snaps back to the MRU's project")
+    }
+
+    func testSnapshotProjectNameIsNilWithoutMetaJson() async throws {
+        let hash = "eeeeeeeeeeee"
+        try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectHash, hash)
+        XCTAssertNil(snap.projectPath)
+        XCTAssertNil(snap.projectName)
+    }
+
     func testWatcherEventTransitionsToAttention() async throws {
         let core = try await BuddyCore(inspectorRoot: inspectorRoot)
         let stream = await core.subscribe()
@@ -93,6 +142,15 @@ final class CoreTests: XCTestCase {
     }
 
     // MARK: helpers
+
+    private func writeMeta(hash: String, projectPath: String) throws {
+        let dir = inspectorRoot.appendingPathComponent("sessions/\(hash)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let data = try JSONSerialization.data(
+            withJSONObject: ["schema_version": 1, "project_path": projectPath]
+        )
+        try data.write(to: dir.appendingPathComponent("meta.json"))
+    }
 
     private func writeFixtureGrade(
         hash: String,

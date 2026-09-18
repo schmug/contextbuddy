@@ -47,6 +47,12 @@ log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 PROJECT_HASH="$(project_hash "$PWD")"
 ensure_session_dir "$PROJECT_HASH"
 
+# Record the project path for the buddy's popover project footer row (issue #38).
+# Deliberately the same "$PWD" that was just hashed, so the recorded path and the
+# session dir name can never name different projects. Non-fatal per §13.
+write_session_meta "$PROJECT_HASH" "$PWD" 2>/dev/null \
+  || log_err "could not write meta.json; popover falls back to the project hash"
+
 # Read hook payload (Claude Code passes JSON on stdin).
 HOOK_PAYLOAD="$(cat || true)"
 

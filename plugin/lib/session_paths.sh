@@ -39,6 +39,10 @@ history_jsonl_path() {
   printf '%s/history.jsonl' "$(session_dir "$1")"
 }
 
+meta_json_path() {
+  printf '%s/meta.json' "$(session_dir "$1")"
+}
+
 suggestions_md_path() {
   printf '%s/suggestions.md' "$(session_dir "$1")"
 }
@@ -140,4 +144,39 @@ atomic_write() {
   tmp="$(mktemp "${dir}/.write.XXXXXX")"
   cat > "$tmp"
   mv -f "$tmp" "$target"
+}
+
+# json_escape_string <string>
+# Minimal JSON string escaper, bash 3.2 parameter expansion only. jq is optional
+# in the hooks (they all guard on `command -v jq`), so recording project identity
+# must not start depending on it.
+json_escape_string() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+
+# write_session_meta <hash> <project_path>
+# Records the absolute project path into the session dir (SPEC.md §4.9) so the
+# buddy's popover project footer row can name the project. The hash is one-way
+# (sha256(path)[:12]), so without this file nothing can recover the path.
+#
+# <project_path> MUST be byte-identical to the string passed to project_hash, or
+# the recorded path and the directory name would name different projects. When
+# issue #4 canonicalizes the hash input, the canonical string is what arrives
+# here — do not normalize a second time in this function.
+#
+# Rewritten on every turn, not just the first: that is what lets session dirs
+# created before this file existed self-heal on their next graded turn.
+# Callers must swallow failures — a meta.json write must never abort the user's
+# session (SPEC.md §13).
+write_session_meta() {
+  local hash="$1"
+  local path="$2"
+  printf '{"schema_version":1,"project_path":"%s"}\n' "$(json_escape_string "$path")" \
+    | atomic_write "$(meta_json_path "$hash")"
 }

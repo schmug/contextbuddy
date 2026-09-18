@@ -87,6 +87,67 @@ final class SessionDiscoveryTests: XCTestCase {
         XCTAssertTrue(discovery.listSessions().isEmpty)
     }
 
+    // MARK: - Project metadata (meta.json, issue #38)
+    //
+    // The hash is one-way, so the popover's project footer row can only name a
+    // project when the plugin recorded the absolute path. These pin both halves
+    // of that contract: the name resolves when meta.json is there, and every
+    // accessor degrades to nil (never a crash) when it is not.
+
+    func testSessionRefResolvesProjectPathAndNameFromMetaJson() throws {
+        let path = "/Users/cory/dev/contextbuddy"
+        let hash = SessionDiscovery.projectHash(for: path)
+        makeSession(named: hash, lastJsonAge: 10)
+        writeMeta(hash: hash, projectPath: path)
+
+        let session = SessionDiscovery(sessionsRoot: root).listSessions().first
+        XCTAssertEqual(session?.projectPath, path)
+        XCTAssertEqual(session?.projectName, "contextbuddy")
+    }
+
+    func testRecordedProjectPathHashesBackToItsDirectoryName() throws {
+        // The whole point of recording the path: it must agree with the hash
+        // the directory is named after, or the footer row names the wrong repo.
+        let path = "/Users/cory/dev/some other project"
+        let hash = SessionDiscovery.projectHash(for: path)
+        makeSession(named: hash, lastJsonAge: 10)
+        writeMeta(hash: hash, projectPath: path)
+
+        let session = SessionDiscovery(sessionsRoot: root).listSessions().first
+        let recorded = try XCTUnwrap(session?.projectPath)
+        XCTAssertEqual(SessionDiscovery.projectHash(for: recorded), session?.projectHash)
+    }
+
+    func testSessionRefFallsBackToNilWhenMetaJsonAbsent() throws {
+        // Session dirs created before meta.json existed. Fallback, not a crash.
+        makeSession(named: "abcabcabcabc", lastJsonAge: 10)
+        let session = SessionDiscovery(sessionsRoot: root).listSessions().first
+        XCTAssertEqual(session?.projectHash, "abcabcabcabc")
+        XCTAssertNil(session?.projectPath)
+        XCTAssertNil(session?.projectName)
+    }
+
+    func testSessionRefIgnoresMalformedMetaJson() throws {
+        let hash = "deadbeefdead"
+        makeSession(named: hash, lastJsonAge: 10)
+        try "not json at all".write(
+            to: root.appendingPathComponent(hash).appendingPathComponent("meta.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let session = SessionDiscovery(sessionsRoot: root).listSessions().first
+        XCTAssertNil(session?.projectPath)
+        XCTAssertNil(session?.projectName)
+    }
+
+    func testProjectNameIsLastPathComponent() {
+        XCTAssertEqual(SessionDiscovery.projectName(forPath: "/a/b/contextbuddy"), "contextbuddy")
+        XCTAssertEqual(SessionDiscovery.projectName(forPath: "/a/b/contextbuddy/"), "contextbuddy")
+        XCTAssertEqual(SessionDiscovery.projectName(forPath: "/only"), "only")
+        XCTAssertNil(SessionDiscovery.projectName(forPath: ""))
+        XCTAssertNil(SessionDiscovery.projectName(forPath: "/"))
+    }
+
     // MARK: - Pinning
 
     func testCurrentSessionPrefersPinned() throws {
@@ -124,6 +185,22 @@ final class SessionDiscoveryTests: XCTestCase {
             ofItemAtPath: lastJson.path
         )
         return hash
+    }
+
+    private func writeMeta(hash: String, projectPath: String) {
+        let dir = root.appendingPathComponent(hash)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let encoded = String(
+            data: try! JSONSerialization.data(
+                withJSONObject: ["schema_version": 1, "project_path": projectPath]
+            ),
+            encoding: .utf8
+        )!
+        try? encoded.write(
+            to: dir.appendingPathComponent("meta.json"),
+            atomically: true,
+            encoding: .utf8
+        )
     }
 }
 

@@ -14,19 +14,30 @@ public actor BuddyCore {
     public struct Snapshot: Sendable, Equatable {
         public let state: BuddyState
         public let projectHash: String?
+        // Absolute path of the project this snapshot reports on, from the
+        // session dir's meta.json (§4.9). nil for sessions graded before the
+        // hook recorded it; the popover then falls back to the hash.
+        public let projectPath: String?
         public let lastGrade: Grade?
         public let pinnedHash: String?
 
         public init(
             state: BuddyState,
             projectHash: String?,
+            projectPath: String? = nil,
             lastGrade: Grade?,
             pinnedHash: String?
         ) {
             self.state = state
             self.projectHash = projectHash
+            self.projectPath = projectPath
             self.lastGrade = lastGrade
             self.pinnedHash = pinnedHash
+        }
+
+        // Name for the popover's project footer row; nil when unknown.
+        public var projectName: String? {
+            projectPath.flatMap { SessionDiscovery.projectName(forPath: $0) }
         }
     }
 
@@ -48,6 +59,10 @@ public actor BuddyCore {
     private var currentHash: String?
     private var config: Config = .defaults
     private var configMTime: Date?
+    // Resolved project paths by hash. Only hits are cached, so a session dir
+    // that gains a meta.json later (the plugin rewrites it every turn) is
+    // picked up on the next snapshot instead of being negatively cached.
+    private var projectPaths: [String: String] = [:]
 
     private var subscriber: AsyncStream<Snapshot>.Continuation?
     private var watcherTask: Task<Void, Never>?
@@ -342,11 +357,25 @@ public actor BuddyCore {
         }
     }
 
+    private func resolveProjectPath(for hash: String) -> String? {
+        if let cached = projectPaths[hash] { return cached }
+        guard let path = SessionDiscovery.projectPath(
+            inSessionDirectory: sessionsRoot.appendingPathComponent(hash)
+        ) else { return nil }
+        projectPaths[hash] = path
+        return path
+    }
+
     private func makeSnapshot() -> Snapshot {
         let lastGrade = currentHash.flatMap { histories[$0]?.lastGrade }
+        // Resolved here rather than at each currentHash assignment so every
+        // path that changes the current session — bootstrap, watcher event,
+        // and an explicit pin — carries the project identity for free.
+        let projectPath = currentHash.flatMap { resolveProjectPath(for: $0) }
         return Snapshot(
             state: state,
             projectHash: currentHash,
+            projectPath: projectPath,
             lastGrade: lastGrade,
             pinnedHash: pinnedHash
         )
