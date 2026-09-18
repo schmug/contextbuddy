@@ -136,6 +136,12 @@ if command -v jq >/dev/null 2>&1; then
     exit 0
   fi
 
+  # One document per line (issue #26): LLM backends emit whatever the model printed and
+  # Haiku pretty-prints, while history.jsonl readers take the last line (lib/job.sh prior
+  # pollution, lib/transcript.sh prior_summary). Compact once here so every write below,
+  # override or not, is a single line.
+  GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
+
   # Mechanically override dominant_signal: loop wins over context_pressure
   # which wins over the grader's dimension choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
