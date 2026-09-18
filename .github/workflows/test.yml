@@ -1,0 +1,65 @@
+# CI merge gate for `main`.
+#
+# One job, `test`, is the required status check in the `main` ruleset
+# (repos/schmug/contextbuddy/rulesets). Renaming the job or the workflow's
+# job id breaks the gate: update the ruleset's required_status_checks context
+# in the same change.
+#
+# Runs on every PR (any base) and on pushes to main. No path filters, so a
+# docs-only PR still gets a reporting check instead of sitting pending.
+#
+# Steps mirror local verification:
+#   bash scripts/test_plugin.sh   # python unittest, shell tests, shellcheck -S error, ruff
+#   swift test                    # Tests/ContextBuddyCoreTests
+# Either failing fails the job (each `run` step is `bash -e`). The Swift step
+# runs even when the plugin step fails so one run reports both suites.
+
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install plugin test dependencies
+        # jq ships on the macos-15 image; brew is a no-op for already-installed formulae.
+        run: brew install shellcheck ruff jq
+
+      - name: Tool versions
+        run: |
+          swift --version
+          python3 --version
+          jq --version
+          shellcheck --version | head -2
+          ruff --version
+
+      - name: Cache SwiftPM build
+        uses: actions/cache@v4
+        with:
+          path: .build
+          # Package.resolved is gitignored, so key on the manifest plus sources.
+          key: swiftpm-${{ runner.os }}-${{ hashFiles('Package.swift', 'Sources/**', 'Tests/ContextBuddyCoreTests/**') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-
+
+      - name: Plugin tests
+        run: bash scripts/test_plugin.sh
+
+      - name: Swift tests
+        if: ${{ !cancelled() }}
+        run: swift test
