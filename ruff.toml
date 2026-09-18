@@ -1,0 +1,6 @@
+# Pin the lint rule set so `ruff check` means the same thing on every ruff
+# version. Without this, ruff's default selection changes between releases
+# (0.14 enabled E4/E7/E9/F; 0.16 enables many more) and CI drifts from local.
+# scripts/test_plugin.sh passes --line-length on the command line.
+[lint]
+select = ["E4", "E7", "E9", "F"]
