@@ -1,4 +1,6 @@
 {"type": "summary", "summary": "ignored"}
+{"type": "user", "isSidechain": false, "uuid": "u-cmd", "message": {"role": "user", "content": "<command-name>/spec</command-name>\n<command-message>spec</command-message>\n<command-args>jwt migration</command-args>"}}
+{"type": "user", "isSidechain": false, "uuid": "u-cmd-out", "message": {"role": "user", "content": [{"type": "text", "text": "<local-command-stdout>spec written to .claude/plans/jwt.md</local-command-stdout>"}]}}
 {"type": "user", "isSidechain": false, "uuid": "u1", "message": {"role": "user", "content": "<system-reminder>\nYou are operating in a git worktree.\nWorktree path: /x/.claude/worktrees/w\n</system-reminder>\n\nRefactor the auth module to use JWT instead of session cookies. Use jose."}}
 {"type": "user", "isSidechain": false, "uuid": "u-reminder", "message": {"role": "user", "content": [{"type": "text", "text": "<system-reminder>\nreminder-only record must be skipped\n</system-reminder>"}]}}
 {"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "content": [{"type": "text", "text": "Reading the module first."}, {"type": "tool_use", "name": "Read", "input": {"file_path": "src/auth/jwt.ts"}}], "usage": {"input_tokens": 1000, "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 500, "output_tokens": 50}}}
