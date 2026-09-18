@@ -27,12 +27,17 @@ import { pathToFileURL } from 'node:url'
 // A typed prompt is a `type:"user"` record that is not a subagent turn (`isSidechain`), not
 // a skill/command expansion the harness injects as a user turn (`isMeta`), not a compaction
 // summary, and carries at least one text block. Tool results arrive as user records too and
-// carry only `tool_result` blocks, so the text requirement drops them.
+// carry only `tool_result` blocks, so the text requirement drops them. `<system-reminder>`
+// blocks the harness prepends to a typed record (worktree notices, hook context) are
+// stripped, as jev_shadow.py does: they are not what the user typed, and as the first
+// record they would otherwise become the anchor (issue #27).
+const REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g
 function typedPromptText(rec) {
   if (rec.type !== 'user' || rec.isSidechain === true || rec.isMeta === true || rec.isCompactSummary === true) return null
   const c = rec.message?.content
-  const text = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => b.text).join('\n') : ''
-  return text.trim() ? text : null
+  const raw = typeof c === 'string' ? c : Array.isArray(c) ? c.filter(b => b?.type === 'text').map(b => b.text).join('\n') : ''
+  const text = raw.replace(REMINDER_RE, '').trim()
+  return text ? text : null
 }
 
 function assistantText(rec) {
@@ -233,15 +238,29 @@ export const QUESTIONS = {
 // does not fall with irrelevant detail: typed prompts and the last reply only, never tool
 // output. On pre-phase the transcript may already contain the prompt being graded, so it
 // is dropped from the recent window rather than shown twice.
+//
+// Anchor: session.md when it exists, else the session's first typed prompt (issue #27; the
+// same fallback jev_shadow.py uses). A literal "not found" anchor made Jev read every prompt
+// as unrelated to the goal. The first prompt is clipped head+tail, not head only, because
+// constraints and exclusions tend to sit at its end. ANCHOR_MISSING is reached only when
+// there is no first prompt either, which grade() never produces.
 const MAX_FIELD_CHARS = 2000
+const ANCHOR_TAIL_CHARS = 500
+const ELISION = '\n[... elided ...]\n'
 export const ANCHOR_MISSING = 'session.md not found'
 const clip = s => (typeof s === 'string' ? s.slice(0, MAX_FIELD_CHARS) : '')
+const clipHeadTail = s => {
+  if (typeof s !== 'string') return ''
+  if (s.length <= MAX_FIELD_CHARS) return s
+  return s.slice(0, MAX_FIELD_CHARS - ANCHOR_TAIL_CHARS - ELISION.length) + ELISION + s.slice(-ANCHOR_TAIL_CHARS)
+}
+const present = s => typeof s === 'string' && s.trim() !== ''
 
 export function buildState({ anchorYaml, firstPrompt, recentPrompts, prompt, lastAssistantText, phase }) {
   let recent = Array.isArray(recentPrompts) ? recentPrompts.slice() : []
   if (recent.length && recent[recent.length - 1] === prompt) recent = recent.slice(0, -1)
   return {
-    anchor: anchorYaml && anchorYaml.trim() ? clip(anchorYaml) : ANCHOR_MISSING,
+    anchor: present(anchorYaml) ? clip(anchorYaml) : present(firstPrompt) ? clipHeadTail(firstPrompt) : ANCHOR_MISSING,
     initial_prompt: clip(firstPrompt),
     recent_user_prompts: recent.map(clip),
     prompt: clip(prompt),
@@ -262,7 +281,7 @@ export function buildState({ anchorYaml, firstPrompt, recentPrompts, prompt, las
 // signals     extra top-level object (§4 says unknown fields are ignored) carrying is_task,
 //             intent distribution, correction and harm probabilities, and threshold masses.
 const RATIONALE_MAX = 120
-const MISSING_PREFIX = 'session.md not found — '
+const FIRST_PROMPT_PREFIX = '(anchor: first prompt) '
 const DIMENSIONS = ['confidence', 'atomicity', 'drift', 'pollution']
 
 const toValue = score => Math.max(0, Math.min(10, Math.round((Number(score) || 0) * 2.5)))
@@ -300,9 +319,9 @@ export function carryPollution(prior) {
   return { value: prior.value, rationale: fit(`(carried from turn ${prior.turn}) ${bare}`) }
 }
 
-export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokensLimit, pollution, thresholds, anchorMissing, model }) {
+export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokensLimit, pollution, thresholds, anchorFromPrompt, model }) {
   const a = answers
-  const rat = (answer, anchored) => fit((anchorMissing && anchored ? MISSING_PREFIX : '') + levelText(answer))
+  const rat = (answer, anchored) => fit((anchorFromPrompt && anchored ? FIRST_PROMPT_PREFIX : '') + levelText(answer))
   const scores = {
     confidence: { value: toValue(a.specificity.score), rationale: rat(a.specificity, true) },
     atomicity: { value: toValue(a.atomicity.score), rationale: rat(a.atomicity, false) },
@@ -429,7 +448,7 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
   const g = mapAnswers({
     answers, phase, turn: job.turn, timestamp: job.timestamp,
     tokensUsed: window.tokensUsed, tokensLimit: job.tokens_limit || 200000,
-    pollution, thresholds, anchorMissing: state.anchor === ANCHOR_MISSING, model: response.model || job.model,
+    pollution, thresholds, anchorFromPrompt: !present(job.session_md), model: response.model || job.model,
   })
   return { gated: false, grade: g, usage: response.usage }
 }

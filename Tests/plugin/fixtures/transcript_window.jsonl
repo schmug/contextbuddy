@@ -1,5 +1,6 @@
 {"type": "summary", "summary": "ignored"}
-{"type": "user", "isSidechain": false, "uuid": "u1", "message": {"role": "user", "content": "Refactor the auth module to use JWT instead of session cookies. Use jose."}}
+{"type": "user", "isSidechain": false, "uuid": "u1", "message": {"role": "user", "content": "<system-reminder>\nYou are operating in a git worktree.\nWorktree path: /x/.claude/worktrees/w\n</system-reminder>\n\nRefactor the auth module to use JWT instead of session cookies. Use jose."}}
+{"type": "user", "isSidechain": false, "uuid": "u-reminder", "message": {"role": "user", "content": [{"type": "text", "text": "<system-reminder>\nreminder-only record must be skipped\n</system-reminder>"}]}}
 {"type": "assistant", "uuid": "a1", "message": {"role": "assistant", "content": [{"type": "text", "text": "Reading the module first."}, {"type": "tool_use", "name": "Read", "input": {"file_path": "src/auth/jwt.ts"}}], "usage": {"input_tokens": 1000, "cache_read_input_tokens": 2000, "cache_creation_input_tokens": 500, "output_tokens": 50}}}
 {"type": "user", "isSidechain": false, "uuid": "u1r", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "export function validateToken() {}"}]}}
 {"type": "user", "isSidechain": false, "isMeta": true, "uuid": "u-meta", "message": {"role": "user", "content": [{"type": "text", "text": "Base directory for this skill: /x\n\n# librarian"}]}}
