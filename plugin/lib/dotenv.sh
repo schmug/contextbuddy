@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # dotenv — read ONE variable's value out of a .env file without sourcing it.
 #
-# Used by hooks/user_prompt_submit.sh to find TYPESAFE_API_KEY when it is not already
+# Used by hooks/user_prompt_submit.sh (TYPESAFE_API_KEY) and grader/invoke.sh
+# (CONTEXTBUDDY_CLAUDE_CONFIG_DIR) for values that are not already
 # in the environment Claude Code inherits. Candidates, first hit wins:
 #   1. $PWD/.env                (the project the hook fired in; a worktree has its own)
 #   2. <git toplevel>/.env      (the worktree root when $PWD is a subdirectory)
