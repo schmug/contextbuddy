@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # test_invoke_config_dir — grader/invoke.sh dispatches the Haiku grade through `claude -p`
 # authenticated as the second Claude account (CLAUDE_CONFIG_DIR), never through
-# ANTHROPIC_API_KEY, and marks the child so the plugin's own hooks do not re-fire.
+# ANTHROPIC_API_KEY, marks the child so the plugin's own hooks do not re-fire, and turns
+# extended thinking off in the child (MAX_THINKING_TOKENS=0, #17) so a grade stays under 10 s.
 #
 # Runs the real invoke.sh with a stub `claude` on PATH that records its argv and the env
 # it received, then prints a fixed §4.1 grade. No network, no keys.
@@ -29,6 +30,7 @@ cat > "$STUB" <<'STUBEOF'
   printf 'argv:%s\n' "$*"
   printf 'skip:%s\n' "${CONTEXTBUDDY_SKIP:-unset}"
   printf 'config_dir:%s\n' "${CLAUDE_CONFIG_DIR:-unset}"
+  printf 'max_thinking_tokens:%s\n' "${MAX_THINKING_TOKENS:-unset}"
   [ -n "${ANTHROPIC_API_KEY:-}" ] && printf 'api_key:present\n' || printf 'api_key:absent\n'
   printf 'cwd:%s\n' "$PWD"
 } >> "$0.log"
@@ -58,6 +60,8 @@ grep -q "^config_dir:$TMP/cfg\$" "$STUB.log" && ok "env: CLAUDE_CONFIG_DIR reach
   || fail "env: CLAUDE_CONFIG_DIR not set for claude: $(grep '^config_dir:' "$STUB.log")"
 grep -q '^skip:1$' "$STUB.log" && ok "env: CONTEXTBUDDY_SKIP=1 reached claude" \
   || fail "env: CONTEXTBUDDY_SKIP missing: $(grep '^skip:' "$STUB.log")"
+grep -q '^max_thinking_tokens:0$' "$STUB.log" && ok "env: MAX_THINKING_TOKENS=0 reached claude (thinking off, #17)" \
+  || fail "env: MAX_THINKING_TOKENS not 0 for claude: $(grep '^max_thinking_tokens:' "$STUB.log")"
 grep -q '^api_key:absent$' "$STUB.log" && ok "env: ANTHROPIC_API_KEY scrubbed from claude env" \
   || fail "env: ANTHROPIC_API_KEY leaked into claude env"
 grep -qE '^argv:.*(^| )(-p|--print)( |$)' "$STUB.log" && ok "env: print mode (-p)" || fail "env: no -p in argv"
