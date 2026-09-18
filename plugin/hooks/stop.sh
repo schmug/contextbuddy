@@ -139,13 +139,13 @@ if command -v jq >/dev/null 2>&1; then
   # Mechanically override dominant_signal: loop wins over context_pressure
   # which wins over the grader's dimension choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
-    GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq '.dominant_signal = "loop"')"
+    GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
   else
     TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
     TOKENS_LIMIT="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_limit // 200000')"
     if [ "$TOKENS_LIMIT" -gt 0 ] && \
        [ "$(( TOKENS_USED * 100 / TOKENS_LIMIT ))" -gt "$CONTEXT_PRESSURE_PCT" ]; then
-      GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq '.dominant_signal = "context_pressure"')"
+      GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "context_pressure"')"
     fi
   fi
 fi
