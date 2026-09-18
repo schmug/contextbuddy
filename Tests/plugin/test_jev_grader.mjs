@@ -35,6 +35,13 @@ test('parseTranscript reports the first typed prompt and the last assistant text
   assert.equal(w.lastAssistantText, 'Fixed the expiry check; tests pass.')
 })
 
+test('parseTranscript strips <system-reminder> blocks from typed prompts and drops reminder-only records', () => {
+  const w = grader.parseTranscript(transcriptText, { windowTurns: 10 })
+  assert.ok(!w.prompts.some(p => p.includes('<system-reminder>')), 'reminder text must not reach the state')
+  assert.ok(!w.prompts.some(p => p.includes('reminder-only')))
+  assert.equal(w.firstPrompt, 'Refactor the auth module to use JWT instead of session cookies. Use jose.')
+})
+
 test('parseTranscript sums the last assistant usage into tokensUsed', () => {
   const w = grader.parseTranscript(transcriptText, { windowTurns: 3 })
   assert.equal(w.tokensUsed, 60200)
@@ -78,13 +85,34 @@ test('buildState on pre drops the current prompt from recent_user_prompts when t
   assert.deepEqual(s.recent_user_prompts, ['a', 'b'])
 })
 
-test('buildState substitutes the missing-anchor sentinel', () => {
-  const s = grader.buildState({ anchorYaml: null, firstPrompt: 'a', recentPrompts: [], prompt: 'a', lastAssistantText: '', phase: 'pre' })
+test('buildState anchors on the first typed prompt when session.md is absent', () => {
+  const first = 'Refactor the auth module to use JWT instead of session cookies. Use jose.'
+  const s = grader.buildState({ anchorYaml: null, firstPrompt: first, recentPrompts: [first, 'b'], prompt: 'b', lastAssistantText: '', phase: 'pre' })
+  assert.equal(s.anchor, first)
+  const blank = grader.buildState({ anchorYaml: '  \n', firstPrompt: first, recentPrompts: [], prompt: 'b', lastAssistantText: '', phase: 'pre' })
+  assert.equal(blank.anchor, first)
+})
+
+test('buildState keeps session.md as the anchor when it exists', () => {
+  const s = grader.buildState({ anchorYaml: 'goal: x', firstPrompt: 'first', recentPrompts: [], prompt: 'p', lastAssistantText: '', phase: 'pre' })
+  assert.equal(s.anchor, 'goal: x')
+})
+
+test('buildState clips a long first-prompt anchor to head plus tail within the field cap', () => {
+  const first = 'H'.repeat(3000) + 'T'.repeat(3000)
+  const s = grader.buildState({ anchorYaml: null, firstPrompt: first, recentPrompts: [], prompt: 'p', lastAssistantText: '', phase: 'pre' })
+  assert.ok(s.anchor.length <= 2000, `anchor is ${s.anchor.length} chars`)
+  assert.ok(s.anchor.startsWith('HHHH'), 'head kept')
+  assert.ok(s.anchor.endsWith('TTTT'), 'tail kept')
+})
+
+test('buildState substitutes the missing-anchor sentinel only when there is no first prompt either', () => {
+  const s = grader.buildState({ anchorYaml: null, firstPrompt: '', recentPrompts: [], prompt: 'a', lastAssistantText: '', phase: 'pre' })
   assert.equal(s.anchor, 'session.md not found')
 })
 
 test('mapAnswers turns the recorded ex1 response into a §4.1 grade with atomicity as dominant signal', () => {
-  const g = grader.mapAnswers({ answers: ex1.answers, phase: 'pre', turn: 14, timestamp: '2026-09-17T12:00:00Z', tokensUsed: 47823, tokensLimit: 200000, pollution: { value: 4, rationale: '(carried from turn 13) x' }, thresholds, anchorMissing: false, model: 'jev-1.13.0' })
+  const g = grader.mapAnswers({ answers: ex1.answers, phase: 'pre', turn: 14, timestamp: '2026-09-17T12:00:00Z', tokensUsed: 47823, tokensLimit: 200000, pollution: { value: 4, rationale: '(carried from turn 13) x' }, thresholds, anchorFromPrompt: false, model: 'jev-1.13.0' })
   assert.equal(g.schema_version, 1)
   assert.equal(g.phase, 'pre')
   assert.equal(g.turn, 14)
@@ -104,15 +132,17 @@ test('mapAnswers turns the recorded ex1 response into a §4.1 grade with atomici
 test('mapAnswers reports no dominant signal when every value is inside its threshold', () => {
   const clean = structuredClone(ex1.answers)
   clean.atomicity.probabilities = { 0: 0, 1: 0, 2: 0, 3: 0.1, 4: 0.9 }; clean.atomicity.score = 3.9
-  const g = grader.mapAnswers({ answers: clean, phase: 'post', turn: 2, timestamp: 't', tokensUsed: 1, tokensLimit: 200000, pollution: { value: 1, rationale: 'r' }, thresholds, anchorMissing: false, model: 'm' })
+  const g = grader.mapAnswers({ answers: clean, phase: 'post', turn: 2, timestamp: 't', tokensUsed: 1, tokensLimit: 200000, pollution: { value: 1, rationale: 'r' }, thresholds, anchorFromPrompt: false, model: 'm' })
   assert.equal(g.dominant_signal, null)
   assert.equal(g.scores.atomicity.value, 10)
 })
 
-test('mapAnswers prefixes anchor-dependent rationales when session.md is missing and keeps them under 120 chars', () => {
-  const g = grader.mapAnswers({ answers: ex1.answers, phase: 'pre', turn: 1, timestamp: 't', tokensUsed: 0, tokensLimit: 200000, pollution: { value: 0, rationale: 'no prior grade' }, thresholds, anchorMissing: true, model: 'm' })
-  assert.ok(g.scores.drift.rationale.startsWith('session.md not found — '))
-  assert.ok(g.scores.confidence.rationale.startsWith('session.md not found — '))
+test('mapAnswers marks anchor-dependent rationales as judged against the first prompt when session.md is missing and keeps them under 120 chars', () => {
+  const g = grader.mapAnswers({ answers: ex1.answers, phase: 'pre', turn: 1, timestamp: 't', tokensUsed: 0, tokensLimit: 200000, pollution: { value: 0, rationale: 'no prior grade' }, thresholds, anchorFromPrompt: true, model: 'm' })
+  assert.ok(g.scores.drift.rationale.startsWith('(anchor: first prompt) '), g.scores.drift.rationale)
+  assert.ok(g.scores.confidence.rationale.startsWith('(anchor: first prompt) '), g.scores.confidence.rationale)
+  assert.ok(!g.scores.atomicity.rationale.startsWith('(anchor'))
+  assert.ok(!/session\.md not found/.test(g.scores.drift.rationale))
   for (const d of ['confidence', 'atomicity', 'drift', 'pollution']) assert.ok(g.scores[d].rationale.length <= 120, d)
 })
 
@@ -161,6 +191,19 @@ test('grade sends one request with every question over a bounded state and retur
   assert.equal(body.state.prompt, 'fix the auth bug and also refactor the validator and add a test')
   assert.equal(body.state.anchor.split('\n')[0], 'goal: Refactor auth module to use JWT')
   assert.ok(!JSON.stringify(body.state).includes('xxxx'), 'tool output must not reach the state')
+})
+
+// Issue #27: without session.md the anchor used to be the literal 'session.md not found', which
+// Jev read as "unrelated to the anchor goal" (drift 6+) on every turn of an anchorless session.
+test('grade with no session_md anchors on the first typed prompt and does not blame a missing session.md for drift', async () => {
+  const capture = {}
+  const r = await grader.grade(baseJob({ session_md: null, hook: { session_id: 's', transcript_path: transcriptPath, cwd: '/tmp/p', prompt: 'Run the auth tests' } }), { fetchImpl: fakeFetch(ex1, { capture }), env })
+  const body = JSON.parse(capture.init.body)
+  assert.equal(body.state.anchor, 'Refactor the auth module to use JWT instead of session cookies. Use jose.')
+  assert.ok(!JSON.stringify(body.state).includes('session.md not found'))
+  assert.ok(r.grade.scores.drift.value <= 2, `drift ${r.grade.scores.drift.value}`)
+  assert.ok(!r.grade.scores.drift.rationale.startsWith('session.md not found'), r.grade.scores.drift.rationale)
+  assert.notEqual(r.grade.dominant_signal, 'drift')
 })
 
 test('grade on post phase grades the last typed prompt, the hook reply, and mechanical pollution', async () => {
