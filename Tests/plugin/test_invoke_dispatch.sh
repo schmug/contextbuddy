@@ -245,6 +245,7 @@ case "$*" in
 esac
 job="$(cat)"
 printf '%s' "$job" | jq -e '.phase' >/dev/null 2>&1 || { printf 'mock-node: stdin is not a job\n' >&2; exit 9; }
+[ -n "${TYPESAFE_API_KEY:-}" ] || { printf 'mock-node: TYPESAFE_API_KEY missing from child env\n' >&2; exit 9; }
 if [ -n "${MOCK_NODE_GATED:-}" ]; then
   printf 'contextbuddy: task gate p=0.05 — not a prompt, grade skipped\n' >&2
   exit 0
@@ -291,10 +292,27 @@ test_typesafe_missing_key_exits_5() {
   local ws; ws="$(make_workspace)"
   stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
   local rc=0
+  # cd into the workspace (not a git repo, no .env) so lib/dotenv.sh cannot find
+  # a key on the developer machine.
   ( unset TYPESAFE_API_KEY
-    PATH="$ws/bin:$PATH" CONTEXTBUDDY_JOB="$ws/job.json" \
+    cd "$ws" && PATH="$ws/bin:$PATH" CONTEXTBUDDY_JOB="$ws/job.json" \
       "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" >/dev/null 2>&1 ) || rc=$?
   if [ "$rc" -eq 5 ]; then pass "typesafe without TYPESAFE_API_KEY exits 5"; else fail "typesafe without key: expected exit 5, got $rc"; fi
+  rm -rf "$ws"
+}
+
+test_typesafe_key_from_dotenv() {
+  # Hooks fired from the desktop app see no shell exports, so the key must also
+  # be found in a .env by lib/dotenv.sh (same route as CONTEXTBUDDY_CLAUDE_CONFIG_DIR)
+  # and handed to the node child. The mock node exits 9 if the key is absent.
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  printf 'TYPESAFE_API_KEY=from-dotenv\n' > "$ws/.env"
+  local actual
+  actual="$( unset TYPESAFE_API_KEY
+    cd "$ws" && RESP_DIR="$ws" PATH="$ws/bin:$PATH" CONTEXTBUDDY_JOB="$ws/job.json" \
+      "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" 2>/dev/null )"
+  assert_emits_expected "typesafe key read from .env via lib/dotenv.sh" "$actual"
   rm -rf "$ws"
 }
 
@@ -321,6 +339,7 @@ test_anthropic_missing_config_dir_exits_5
 test_typesafe_dispatch
 test_typesafe_gated_exits_0_empty
 test_typesafe_missing_key_exits_5
+test_typesafe_key_from_dotenv
 test_typesafe_missing_job_exits_2
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
