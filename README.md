@@ -57,6 +57,8 @@ Four dimensions, each scored 0-10. Definitions are locked — see `plugin/grader
 
 Confidence and atomicity are "high is good" (≥7 = green). Drift and pollution are inverted: "low is good" (≤3 = green).
 
+**Jev shadow grader (Request A).** If `TYPESAFE_API_KEY` is in the environment Claude Code inherits, or in a `.env` in the project directory, every UserPromptSubmit also sends a small state (the session's first prompt, the last three prompts, and the prompt being submitted; no tool output) to TypeSafe's `jev-1.13.0` and asks for `specificity`, `atomicity`, and `drift` as Score questions over the same rubric rows, plus an `intent` Choice. The answer is logged to `turns/NNN-pre.jev.json` and `jev.jsonl` beside the Haiku grade, with the full probability distribution, confidence, argmax level, latency, and the Haiku scores for the same turn. It runs detached, never slows the prompt, and drives nothing: the buddy reads only `last.json`. Missing key or a failed call means no row and a line in `jev.log`. Cost is under $0.001 per turn at published pricing. Details: `plugin/grader/jev_shadow.py`.
+
 The buddy aggregates these into seven states. Default thresholds (in `~/.claude/inspector/config.toml`):
 
 | State | Trigger |

@@ -35,6 +35,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/session_paths.sh"
 # shellcheck source=../lib/transcript.sh
 . "$PLUGIN_ROOT/lib/transcript.sh"
+# shellcheck source=../lib/dotenv.sh
+. "$PLUGIN_ROOT/lib/dotenv.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -54,6 +56,51 @@ trap 'release_lock "$PROJECT_HASH" "write"' EXIT
 
 TURN="$(next_turn_number "$PROJECT_HASH")"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Jev shadow grader (Request A). Advisory, async, acts on nothing. Spawned detached
+# BEFORE the Haiku call so the two run concurrently; the child polls for the Haiku
+# turn file (turns/NNN-pre.json) to copy its scores into the shadow row it writes
+# (turns/NNN-pre.jev.json + jev.jsonl). Nothing below this block changes: on any
+# failure here the Haiku grade proceeds exactly as before. Key comes from
+# TYPESAFE_API_KEY or a .env (lib/dotenv.sh) and is passed only via the child's env.
+# CONTEXTBUDDY_JEV_RUNNER overrides the runner for tests.
+spawn_jev_shadow() {
+  local key="${TYPESAFE_API_KEY:-}"
+  [ -n "$key" ] || key="$(dotenv_value TYPESAFE_API_KEY || true)"
+  [ -n "$key" ] || return 0
+  local script="$PLUGIN_ROOT/grader/jev_shadow.py"
+  local cmd
+  if [ -n "${CONTEXTBUDDY_JEV_RUNNER:-}" ]; then
+    [ -x "$CONTEXTBUDDY_JEV_RUNNER" ] || return 0
+    cmd=("$CONTEXTBUDDY_JEV_RUNNER")
+  else
+    local uv
+    uv="$(command -v uv 2>/dev/null || true)"
+    [ -z "$uv" ] && [ -x "$HOME/.local/bin/uv" ] && uv="$HOME/.local/bin/uv"
+    if [ -n "$uv" ]; then
+      cmd=("$uv" run -q --script "$script")
+    elif python3 -c 'import typesafe_sdk' >/dev/null 2>&1; then
+      cmd=(python3 "$script")
+    else
+      return 0
+    fi
+  fi
+  local payload_file
+  payload_file="$(mktemp "${TMPDIR:-/tmp}/contextbuddy-jev.XXXXXX")" || return 0
+  printf '%s' "$HOOK_PAYLOAD" > "$payload_file"
+  local sdir
+  sdir="$(session_dir "$PROJECT_HASH")"
+  TYPESAFE_API_KEY="$key" nohup "${cmd[@]}" \
+    --payload "$payload_file" \
+    --turn "$TURN" \
+    --timestamp "$TIMESTAMP" \
+    --project-hash "$PROJECT_HASH" \
+    --session-dir "$sdir" \
+    --system-prompt "$PLUGIN_ROOT/grader/system_prompt.md" \
+    </dev/null >>"$sdir/jev.log" 2>&1 &
+  disown 2>/dev/null || true
+}
+spawn_jev_shadow || true
 
 # Read config; fall back to defaults silently per §13.
 CONFIG_PATH="$(config_path)"
