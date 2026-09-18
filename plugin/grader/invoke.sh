@@ -24,6 +24,17 @@
 #   - Nothing from the credential store is printed.
 #   - HOME must be the real one: the CLI finds the login keychain through HOME, so a
 #     test that overrides HOME gets "Not logged in" (use a stub `claude` instead).
+#   - MAX_THINKING_TOKENS=0: extended thinking OFF in the child (issue #17). `claude -p`
+#     otherwise thinks with Haiku (~3.5k thinking tokens/grade); the visible grade
+#     JSON is ~330 tokens either way and the rubric is mechanical, so thinking only
+#     adds latency. Measured 2026-09-18 through this script, same input (README
+#     worked example 1): default 39 s wall / 3437 output tokens; MAX_THINKING_TOKENS=0
+#     6 s / 417. UserPromptSubmit command hooks time out at 30 s (docs/en/hooks), so
+#     a thinking grade never lands on the pre phase anyway.
+#     MAX_THINKING_TOKENS=0 is the documented way to disable thinking on the
+#     Anthropic API (docs/en/env-vars); CLAUDE_CODE_DISABLE_THINKING=1 only omits
+#     the parameter, and `--effort` is rejected by Haiku 4.5. Change the budget
+#     here only with a fresh wall-clock measurement.
 #
 # Usage:
 #   plugin/grader/invoke.sh <system_prompt_path> <user_input_path> <model> > out.json
@@ -80,7 +91,7 @@ run_once() {
   sys="$(cat "$SYSTEM_PROMPT_PATH")"
   (
     cd "$CHILD_CWD" || exit 1
-    CLAUDE_CONFIG_DIR="$CONFIG_DIR" CONTEXTBUDDY_SKIP=1 \
+    CLAUDE_CONFIG_DIR="$CONFIG_DIR" CONTEXTBUDDY_SKIP=1 MAX_THINKING_TOKENS=0 \
       env -u ANTHROPIC_API_KEY claude \
         --model "$MODEL" \
         --output-format text \
