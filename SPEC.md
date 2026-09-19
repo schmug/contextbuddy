@@ -754,7 +754,7 @@ backend packs the same digest into it and rendering both repeats every number.
 
 - "Ack current state" (disabled when in `idle`/`sleep`/`busy`)
 - "Mute current signal — this session"
-- "Recent sessions ▶" (submenu listing last 5 project hashes by name, allowing pin-to)
+- "Recent sessions ▶" (submenu listing the last 5 sessions by project name, allowing pin-to). Each item is titled with the project name resolved from the session's `meta.json` (§4.9), the same name as the §9.3 footer row; a session dir with no `meta.json` shows the hash prefix (`abcdef…`), never a blank row. Two visible sessions that resolve to the same name each carry their hash prefix as a suffix (`api (abcdef)`) so the rows stay distinguishable. The item's pin target and its checkmark are keyed on the full hash, never the title.
 - "Open inspector folder"
 - separator
 - "Preferences (edit config.toml)"

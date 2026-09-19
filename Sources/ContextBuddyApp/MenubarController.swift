@@ -185,22 +185,57 @@ final class MenubarController: NSObject, NSMenuDelegate {
             empty.isEnabled = false
             submenu.addItem(empty)
         } else {
-            for session in sessions {
-                let item = NSMenuItem(
-                    title: session.projectHash,
-                    action: #selector(menuPinSession(_:)),
-                    keyEquivalent: ""
-                )
+            for item in Self.recentSessionItems(for: sessions, pinnedHash: snapshot.pinnedHash) {
                 item.target = self
-                item.representedObject = session.projectHash
-                if snapshot.pinnedHash == session.projectHash {
-                    item.state = .on
-                }
+                item.action = #selector(menuPinSession(_:))
                 submenu.addItem(item)
             }
         }
         parent.submenu = submenu
         return parent
+    }
+
+    // One submenu item per session, in the order given. Static and free of
+    // controller state so the titling rule is testable without a BuddyCore or
+    // an NSStatusItem (RecentSessionsMenuTests); the caller wires target and
+    // action. representedObject carries the hash because menuPinSession(_:)
+    // and BuddyCore.pinSession key on it, and the checkmark is the same
+    // comparison against Snapshot.pinnedHash.
+    static func recentSessionItems(for sessions: [SessionRef], pinnedHash: String?) -> [NSMenuItem] {
+        let titles = recentSessionTitles(for: sessions)
+        return zip(sessions, titles).map { (session: SessionRef, title: String) -> NSMenuItem in
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.representedObject = session.projectHash
+            if pinnedHash == session.projectHash {
+                item.state = .on
+            }
+            return item
+        }
+    }
+
+    // Titles for the Recent sessions submenu (§9.4 "by name"), one per session,
+    // in order. The name comes from SessionRef.projectName — the repository-root
+    // resolver the popover footer row uses — so the two surfaces agree. A
+    // session dir with no meta.json falls back to the hash prefix exactly as
+    // PopoverView.projectLabel does (the hash is one-way; nothing else is
+    // known), never a blank row. Two visible sessions that resolve to the same
+    // name (`~/work/api` and `~/side/api`) each get their hash prefix appended
+    // so the rows stay distinguishable. Five items at most, built on
+    // right-click, so the per-name filesystem walk is not cached here the way
+    // BuddyCore caches it for the snapshot.
+    static func recentSessionTitles(for sessions: [SessionRef]) -> [String] {
+        let names = sessions.map { (session: SessionRef) -> String? in
+            session.projectName.flatMap { (name: String) -> String? in name.isEmpty ? nil : name }
+        }
+        var occurrences: [String: Int] = [:]
+        for case let name? in names {
+            occurrences[name, default: 0] += 1
+        }
+        return zip(sessions, names).map { (session: SessionRef, name: String?) -> String in
+            let prefix = String(session.projectHash.prefix(6))
+            guard let name else { return prefix + "…" }
+            return occurrences[name, default: 0] > 1 ? "\(name) (\(prefix))" : name
+        }
     }
 
     private var canAck: Bool {
