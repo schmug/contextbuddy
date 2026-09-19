@@ -2,7 +2,7 @@
 # user_prompt_submit — fired by Claude Code on every UserPromptSubmit.
 #
 # Pipeline (SPEC.md §10.1):
-#   1. Resolve project hash from $PWD.
+#   1. Resolve project hash from the canonical (symlink-resolved) $PWD.
 #   2. Ensure session dir exists.
 #   3. Read hook payload from stdin.
 #   4. Determine current turn = max(turns/) + 1.
@@ -45,13 +45,17 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
-PROJECT_HASH="$(project_hash "$PWD")"
+# Canonical (symlink-resolved) project path, so /tmp/x and /private/tmp/x land in
+# one session dir whichever form Claude Code hands this hook (issue #4).
+PROJECT_PATH="$(canonical_project_path "$PWD")"
+PROJECT_HASH="$(project_hash "$PROJECT_PATH")"
 ensure_session_dir "$PROJECT_HASH"
 
 # Record the project path for the buddy's popover project footer row (issue #38).
-# Deliberately the same "$PWD" that was just hashed, so the recorded path and the
-# session dir name can never name different projects. Non-fatal per §13.
-write_session_meta "$PROJECT_HASH" "$PWD" 2>/dev/null \
+# Deliberately the same canonical string that was just hashed (SPEC.md §4.9), so
+# the recorded path and the session dir name can never name different projects.
+# Non-fatal per §13.
+write_session_meta "$PROJECT_HASH" "$PROJECT_PATH" 2>/dev/null \
   || log_err "could not write meta.json; popover falls back to the project hash"
 
 # Read hook payload (Claude Code passes JSON on stdin).
@@ -123,6 +127,26 @@ CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "contex
 # suggestions.md harm section below, which signals reached it. The default matches
 # HARM_ACTION in jev.mjs and lib/job.sh.
 HARM_ACTION="$(toml_get_section_float "$CONFIG_PATH" "grader.typesafe" "harm_action" 0.7)"
+
+# Turn window and token count come from the JSONL transcript at hook.transcript_path;
+# the payload carries neither (issue #9, lib/transcript.sh). The window is the
+# [grader] sliding_window_turns the typesafe job also reads (lib/job.sh), default 3.
+# The current prompt is dropped from the window when the harness already appended it.
+# A missing or unreadable transcript is an empty window plus a stderr warning, never
+# a skip.
+WINDOW_TURNS="$(toml_get_section_int "$CONFIG_PATH" "grader" "sliding_window_turns" 3)"
+TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
+CURRENT_PROMPT="$(printf '%s' "$HOOK_PAYLOAD" | jq -r '.prompt // ""' 2>/dev/null || true)"
+WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" "$WINDOW_TURNS" "$CURRENT_PROMPT")"
+TOKENS_USED_TX="$(tokens_used_from_window "$WINDOW_JSON")"
+
+# Context window for this session (issue #47, lib/context_window.sh): model from the
+# transcript tail, limit from the override / auto-compact window / model table, floored
+# against the transcript count above so used <= limit always. Resolved once: the
+# "## tokens" line the LLM backends copy, the typesafe job and the grade written below
+# all carry this one pair.
+CTX="$(resolve_context_window "$TRANSCRIPT_PATH" "$TOKENS_USED_TX")"
+TOKENS_LINE="$(tokens_line_from_context "$CTX")"
 
 # Turn window and token count come from the JSONL transcript at hook.transcript_path;
 # the payload carries neither (issue #9, lib/transcript.sh). The window is the
