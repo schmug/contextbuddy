@@ -215,7 +215,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. Three consecutive edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
