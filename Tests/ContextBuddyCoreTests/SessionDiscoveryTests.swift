@@ -141,7 +141,10 @@ final class SessionDiscoveryTests: XCTestCase {
     // accessor degrades to nil (never a crash) when it is not.
 
     func testSessionRefResolvesProjectPathAndNameFromMetaJson() throws {
-        let path = "/Users/cory/dev/contextbuddy"
+        // Under the temp root, never a host-absolute path: the resolver walks
+        // up to the nearest `.git`, so a hard-coded path would name whatever
+        // repository this machine keeps above it.
+        let path = root.appendingPathComponent("projects/contextbuddy").path
         let hash = SessionDiscovery.projectHash(for: path)
         makeSession(named: hash, lastJsonAge: 10)
         writeMeta(hash: hash, projectPath: path)
@@ -263,10 +266,17 @@ final class SessionDiscoveryTests: XCTestCase {
         try Data().write(to: empty.appendingPathComponent(".git"))
         XCTAssertEqual(SessionDiscovery.projectName(forPath: empty.path), "empty")
 
-        // Paths that do not exist on disk (the project was deleted since the
-        // hook recorded it) and degenerate input keep the old edge behaviour.
-        XCTAssertEqual(SessionDiscovery.projectName(forPath: "/a/b/contextbuddy"), "contextbuddy")
-        XCTAssertEqual(SessionDiscovery.projectName(forPath: "/a/b/contextbuddy/"), "contextbuddy")
+        // A path with no repository above it that does not exist on disk
+        // keeps the old edge behaviour, trailing slash included. (A deleted
+        // project inside a repository still names that repository: the walk
+        // only needs the ancestors to exist.)
+        let gone = root.appendingPathComponent("gone/contextbuddy")
+        XCTAssertEqual(SessionDiscovery.projectName(forPath: gone.path), "contextbuddy")
+        XCTAssertEqual(SessionDiscovery.projectName(forPath: gone.path + "/"), "contextbuddy")
+
+        // Degenerate input. `/only` is the one path that cannot move under the
+        // temp root: a single component stops the walk before the root, and
+        // the result holds unless `/only/.git` is a worktree pointer file.
         XCTAssertEqual(SessionDiscovery.projectName(forPath: "/only"), "only")
         XCTAssertNil(SessionDiscovery.projectName(forPath: ""))
         XCTAssertNil(SessionDiscovery.projectName(forPath: "/"))

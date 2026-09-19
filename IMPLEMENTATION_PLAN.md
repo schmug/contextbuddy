@@ -193,7 +193,7 @@ Each row below is one test. State machine is pure → table-driven `XCTest` with
 - MRU returns sessions ordered by `last.json` mtime; a session with no `last.json` yet orders by its directory mtime instead.
 - Pinned session overrides MRU.
 - Empty `~/.claude/inspector/sessions/` → empty MRU, no error.
-- Project name resolves to the git root, against fabricated `.git` fixtures rather than `git init`: a `.git` directory names the checkout even from a cwd below it (`testProjectNameIsTheCheckoutNameInAPlainRepo`); a worktree's `gitdir:` pointer file, absolute or relative, names the main checkout (`testProjectNameInAWorktreeIsTheMainCheckoutName`); no repository above the path, a garbage or empty `.git` file, and a path that no longer exists all fall back to the last path component (`testProjectNameFallsBackToLastPathComponentOutsideAnyRepo`).
+- Project name resolves to the git root, against fabricated `.git` fixtures rather than `git init`: a `.git` directory names the checkout even from a cwd below it (`testProjectNameIsTheCheckoutNameInAPlainRepo`); a worktree's `gitdir:` pointer file, absolute or relative, names the main checkout (`testProjectNameInAWorktreeIsTheMainCheckoutName`); a path with no repository above it, whether or not it still exists on disk, and a garbage or empty `.git` file all fall back to the last path component (`testProjectNameFallsBackToLastPathComponentOutsideAnyRepo`).
 
 ### `StorageTests.swift`
 

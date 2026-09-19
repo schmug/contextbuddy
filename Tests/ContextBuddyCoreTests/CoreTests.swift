@@ -68,7 +68,10 @@ final class CoreTests: XCTestCase {
     func testSnapshotCarriesProjectNameFromMetaJson() async throws {
         // The popover's project footer row reads Snapshot, so the name has to
         // survive the trip from the session dir through BuddyCore (issue #38).
-        let path = "/Users/cory/dev/contextbuddy"
+        // Under the temp root, never a host-absolute path: the resolver walks
+        // up to the nearest `.git`, so a hard-coded path would name whatever
+        // repository this machine keeps above it.
+        let path = inspectorRoot.appendingPathComponent("projects/contextbuddy").path
         let hash = SessionDiscovery.projectHash(for: path)
         try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
         try writeMeta(hash: hash, projectPath: path)
@@ -82,8 +85,8 @@ final class CoreTests: XCTestCase {
     func testPinningAnotherSessionSwitchesTheProjectName() async throws {
         // Acceptance for issue #38: the footer row must follow the active
         // session, not stay on whichever one the popover opened with.
-        let mruPath = "/Users/cory/dev/dmarcheck"
-        let pinnedPath = "/Users/cory/dev/contextbuddy"
+        let mruPath = inspectorRoot.appendingPathComponent("projects/dmarcheck").path
+        let pinnedPath = inspectorRoot.appendingPathComponent("projects/contextbuddy").path
         let mruHash = SessionDiscovery.projectHash(for: mruPath)
         let pinnedHash = SessionDiscovery.projectHash(for: pinnedPath)
         try writeFixtureGrade(hash: mruHash, fixture: "example1_pre_turn14", mtimeAge: 5)
