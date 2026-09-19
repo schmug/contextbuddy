@@ -139,7 +139,7 @@ struct PopoverView: View {
         let over = pct > tokenRowPct
         return HStack(spacing: 4) {
             Text("⚡")
-            Text("\(short(grade.tokensUsed)) / \(short(grade.tokensLimit))")
+            Text("\(TokenFormat.short(grade.tokensUsed)) / \(TokenFormat.short(grade.tokensLimit))")
             Text("(\(pct)%)")
                 .fontWeight(over ? .semibold : .regular)
             Spacer()
@@ -364,11 +364,6 @@ struct PopoverView: View {
         }
         let relative = RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
         return "Turn \(grade.turn), graded \(phase) \(relative).\n\(date.formatted(date: .abbreviated, time: .standard))"
-    }
-
-    private func short(_ n: Int) -> String {
-        if n >= 1000 { return "\(n / 1000)k" }
-        return String(n)
     }
 
     private func percentValue(_ grade: Grade) -> Int {
