@@ -45,10 +45,14 @@ not the real shapes, and CI has no key and no plugin install. On 2026-09-18,
 run would have shown (#25, #26, #27, #30).
 
 Recipe. Measured 2026-09-19 with `backend = "typesafe"`: 8 s wall, of which
-the reinstall was 1 s and the turn 7 s; the post grade was on disk when
-`claude -p` returned.
+the reinstall was 1 s and the turn 7 s.
 
 ```bash
+# 0. The install copies plugin/ from the marketplace's source checkout, so that
+#    checkout must be at the commit you mean to test. Find it, then move it.
+claude plugin marketplace list            # "contextbuddy  Source: Directory (<path>)"
+git -C <path> fetch origin && git -C <path> checkout --detach origin/main   # or the PR branch
+
 # 1. Refresh the installed copy. `claude plugin update` is a no-op here (see Facts).
 claude plugin uninstall contextbuddy@contextbuddy && claude plugin install contextbuddy@contextbuddy
 
@@ -80,14 +84,29 @@ history.jsonl: 2 lines for 2 grade files
 wall 8 s (reinstall 1 s, turn 7 s)
 ```
 
+Both hooks are `async: true` in `plugin/hooks/hooks.json`, and `claude -p`
+exits as soon as the reply is printed, so the Stop hook is sometimes cut off:
+two 2026-09-19 probes wrote `001-pre.json` only, a third wrote both. A missing
+post grade after a `-p` probe is the harness, not the hook. To prove the post
+path, run the hook by hand against the transcript the probe left behind
+(`~/.claude/projects/<cwd-slug>/<session-id>.jsonl` under the config dir the
+probe used) and read the grade it writes:
+
+```bash
+T=<transcript.jsonl>
+jq -cn --arg t "$T" --arg c "$PWD" '{session_id:"probe",transcript_path:$t,cwd:$c,hook_event_name:"Stop",last_assistant_message:"ok",stop_reason:"end_turn"}' \
+  | bash <plugin-root>/hooks/stop.sh
+jq -r '"post tokens \(.tokens_used)/\(.tokens_limit) (\(.limit_source)) dominant_signal \(.dominant_signal)"' "$S/turns/001-post.json"
+```
+
 The line count must equal the grade-file count. Readers take the last line of
 `history.jsonl` (`plugin/lib/job.sh`, `plugin/lib/transcript.sh`), so one
 multi-line record hides the prior grade (#26, #30;
 `Tests/plugin/test_history_one_line.sh`). Anything the run surfaces that the PR
 does not fix goes in the body as a follow-up issue, the way #25 did.
 
-A branch that is not on the main checkout (the marketplace points at
-`/Users/cory/contextbuddy`): skip step 1 and run step 2 from the worktree as
+A branch that is not in the marketplace's source checkout: skip steps 0 and 1
+and run step 2 from the worktree as
 `claude --plugin-dir "$PWD/plugin" -p "Reply with the single word ok." --max-turns 1`.
 Verified 2026-09-19 with a marker in the worktree copy: the worktree hooks ran,
 the installed copy did not, one grade pair per turn. Note the flag in the PR
