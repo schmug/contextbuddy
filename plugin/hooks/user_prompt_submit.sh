@@ -215,6 +215,23 @@ if command -v jq >/dev/null 2>&1; then
       ;;
   esac
 
+  # harm is typesafe-only (SPEC §5.4): the allowlist above accepts the string from any
+  # backend, so an LLM grader could still set dominant_signal "harm" with no signals
+  # evidence to force the attention state (issue #55 exists for the same reason on the
+  # dimension names). Keep it only when a numeric signals.destructive or signals.bypass
+  # is at or above the resolved harm_action; otherwise clear it before it reaches
+  # suggestions.md or last.json.
+  if [ "$DOM_RAW" = "harm" ]; then
+    NEW="$(printf '%s' "$GRADE_JSON" | jq -c --argjson t "$HARM_ACTION" '
+      (.signals.destructive // null) as $d | (.signals.bypass // null) as $b
+      | if (($d|type) == "number" and $d >= $t) or (($b|type) == "number" and $b >= $t)
+        then . else .dominant_signal = null end
+    ' 2>/dev/null)" && [ -n "$NEW" ] && GRADE_JSON="$NEW"
+    if [ "$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')" != "harm" ]; then
+      log_err "dominant_signal harm has no signals evidence at or above harm_action ($HARM_ACTION); cleared"
+    fi
+  fi
+
   # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): tokens_used
   # from the transcript (lib/transcript.sh), tokens_limit per session model with the
   # evidence floor (lib/context_window.sh, issue #47). When the transcript carries no

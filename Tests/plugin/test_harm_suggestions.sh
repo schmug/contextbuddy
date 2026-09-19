@@ -102,14 +102,27 @@ harm_section | grep -qF 'bypass 97%' && ! harm_section | grep -qF 'destructive' 
 harm_section | grep -qF '90%' && ok "post harm_action 0.9: section states the configured threshold" || fail "post harm_action 0.9: threshold: $(harm_section)"
 rm -f "$CONFIG"
 
-# --- 4. harm from a backend that writes no signals block still logs, never crashes -------
+# --- 4. harm from a backend with no signals block at all is unenforceable evidence, so the
+#        sentinel is cleared rather than trusted (issue #7 hardening: harm is typesafe-only,
+#        SPEC §5.4; the allowlist alone would let a prompt-injected LLM grader set the
+#        sentinel with nothing behind it). SUGG accumulates across cases, so a new harm
+#        section is detected by line count, not by grepping the whole file.
+LINES_BEFORE="$(wc -l < "$SUGG" 2>/dev/null || echo 0)"
 stage_grade post null
 rc="$(run_hook "$POST_HOOK" "$POST_PAYLOAD")"
 [ "$rc" = "0" ] && ok "post harm no signals: hook exits 0" || fail "post harm no signals: hook exit $rc ($(cat "$TMP/hook.err"))"
-[ "$(last_dominant)" = "harm" ] && ok "post harm no signals: harm kept" || fail "post harm no signals: dominant_signal is '$(last_dominant)'"
-grep -qE '^## Turn 1 — .* — harm$' "$SUGG" && ok "post harm no signals: section still appended" || fail "post harm no signals: no section"
-! harm_section | grep -qF 'null' && ok "post harm no signals: no null in the section" || fail "post harm no signals: $(harm_section)"
-harm_section | grep -qF 'severity n/a' && ok "post harm no signals: severity reads n/a" || fail "post harm no signals: $(harm_section)"
+[ "$(last_dominant)" = "null" ] && ok "post harm no signals: harm cleared for lack of evidence" || fail "post harm no signals: dominant_signal is '$(last_dominant)'"
+[ "$(wc -l < "$SUGG" 2>/dev/null || echo 0)" -eq "$LINES_BEFORE" ] && ok "post harm no signals: no harm section appended" || fail "post harm no signals: harm section appended"
+grep -qF 'contextbuddy:' "$TMP/hook.err" && ok "post harm no signals: stderr carries a contextbuddy note" || fail "post harm no signals: no stderr note"
+
+# --- 5. harm with signals present but below harm_action is the same unenforced case --------
+LINES_BEFORE="$(wc -l < "$SUGG" 2>/dev/null || echo 0)"
+stage_grade post '{"backend":"typesafe","destructive":0.5,"bypass":0.4,"severity":1}'
+rc="$(run_hook "$POST_HOOK" "$POST_PAYLOAD")"
+[ "$rc" = "0" ] && ok "post harm below threshold: hook exits 0" || fail "post harm below threshold: hook exit $rc ($(cat "$TMP/hook.err"))"
+[ "$(last_dominant)" = "null" ] && ok "post harm below threshold: harm cleared" || fail "post harm below threshold: dominant_signal is '$(last_dominant)'"
+[ "$(wc -l < "$SUGG" 2>/dev/null || echo 0)" -eq "$LINES_BEFORE" ] && ok "post harm below threshold: no harm section appended" || fail "post harm below threshold: harm section appended"
+grep -qF 'contextbuddy:' "$TMP/hook.err" && ok "post harm below threshold: stderr carries a contextbuddy note" || fail "post harm below threshold: no stderr note"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
