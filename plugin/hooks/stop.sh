@@ -3,7 +3,8 @@
 #
 # Same pipeline as user_prompt_submit.sh but with phase=post and the
 # additional responsibilities listed in §10.1:
-#   - parse hook input for tool calls, append to edits.jsonl
+#   - read this turn's Edit/Write tool_use records from the JSONL transcript at
+#     hook.transcript_path (the payload carries no tool calls), append to edits.jsonl
 #   - run loop detection per §5.4
 #   - override dominant_signal to "loop" if triggered
 
@@ -66,14 +67,17 @@ GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 
+# This turn's window, token count and edited files come from the JSONL transcript at
+# hook.transcript_path; the payload carries none of them (issue #9, lib/transcript.sh).
+# On post the window keeps this turn's prompt last. A missing or unreadable transcript
+# is an empty window plus a stderr warning, never a skip.
+TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
+WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" 3)"
+TOKENS_LINE="$(tokens_from_window "$WINDOW_JSON")"
+TOKENS_USED_TX="${TOKENS_LINE%% *}"
+
 if command -v jq >/dev/null 2>&1; then
-  EDITED_FILES_JSON="$(printf '%s' "$HOOK_PAYLOAD" | jq -c '
-    [
-      (.tool_calls // .turn.tool_calls // [])[]?
-      | select((.name // "") | test("(Edit|Write|MultiEdit)"; "i"))
-      | (.input.file_path // .input.path // empty)
-    ] | unique
-  ' 2>/dev/null || printf '[]')"
+  EDITED_FILES_JSON="$(edited_files_from_window "$WINDOW_JSON")"
   EDIT_RECORD="$(jq -c -n --arg ts "$TIMESTAMP" --argjson turn "$TURN" --argjson files "$EDITED_FILES_JSON" \
     '{ts: $ts, turn: $turn, files: $files}')"
   printf '%s\n' "$EDIT_RECORD" >> "$EDITS_PATH"
@@ -106,9 +110,9 @@ fi
   printf '## turn\n%s\n\n' "$TURN"
   printf '## timestamp\n%s\n\n' "$TIMESTAMP"
   printf '## prior summary\n%s\n\n' "$(prior_summary "$PROJECT_HASH")"
-  printf '## tokens\n%s\n\n' "$(tokens_from_hook_payload "$HOOK_PAYLOAD")"
+  printf '## tokens\n%s\n\n' "$TOKENS_LINE"
   printf '## last 3 turns (from hook transcript)\n```json\n%s\n```\n\n' \
-    "$(recent_turns_from_hook_payload "$HOOK_PAYLOAD" 3)"
+    "$(prompts_from_window "$WINDOW_JSON")"
   printf '## files edited in last 5 turns\n```json\n%s\n```\n\n' \
     "$(files_edited_recent "$PROJECT_HASH" 5)"
   printf '## completed turn\n%s\n' "$HOOK_PAYLOAD"
@@ -147,6 +151,14 @@ if command -v jq >/dev/null 2>&1; then
   # pollution, lib/transcript.sh prior_summary). Compact once here so every write below,
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
+
+  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): the
+  # transcript count replaces the model's copy of it, so context_pressure below is
+  # decided from the transcript. No transcript, or none with assistant usage yet
+  # (count 0), keeps whatever the grader reported.
+  if [ "$TOKENS_USED_TX" -gt 0 ] 2>/dev/null; then
+    GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c --argjson t "$TOKENS_USED_TX" '.tokens_used = $t')"
+  fi
 
   # Mechanically override dominant_signal: loop wins over context_pressure
   # which wins over the grader's dimension choice.
