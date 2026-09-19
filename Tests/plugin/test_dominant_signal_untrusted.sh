@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # test_dominant_signal_untrusted — the grader's dominant_signal is model output and must
-# never reach a jq program as code, and must never leave the six values SPEC §4.1 names.
+# never reach a jq program as code, and must never leave the seven values SPEC §4.1 names.
 #
 # Before this test the hooks ran `jq -r ".scores.${DOMINANT}.rationale // .summary_update"`,
 # so a grader that returned dominant_signal 'x.r // (env.SECRET_DEMO) //' made the hook read an
@@ -96,7 +96,9 @@ rc="$(run_hook "$PRE_HOOK" "$PRE_PAYLOAD")"
 grep -qF '**Issue**: confidence rationale' "$SUGG" && ok "pre confidence: rationale looked up by key" || fail "pre confidence: rationale missing from suggestions.md"
 
 # --- 4. a plausible-looking but unknown value is cleared, not looked up ------------------
-stage_grade post harm
+# (`harm` joined the allowlist with issue #7 — test_harm_suggestions.sh covers it — so the
+# unknown value here is another signals-block field name the grader could plausibly emit.)
+stage_grade post severity
 rc="$(run_hook "$POST_HOOK" "$POST_PAYLOAD")"
 [ "$rc" = "0" ] && ok "post unknown: hook exits 0" || fail "post unknown: hook exit $rc"
 [ "$(last_dominant)" = "null" ] && ok "post unknown: unlisted value cleared" || fail "post unknown: dominant_signal is '$(last_dominant)'"

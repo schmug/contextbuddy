@@ -69,6 +69,48 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(decoded.dominantSignal, .contextPressure)
     }
 
+    // Issue #7: the typesafe grader sets "harm" when signals.destructive or
+    // signals.bypass reaches the action threshold. Additive: schema_version
+    // stays 1 and a grade without `signals` decodes exactly as before.
+    func testHarmSentinelRoundTrip() throws {
+        let grade = sampleGrade(dominantSignal: .harm)
+        let encoded = try GradeCoding.encoder.encode(grade)
+        let json = String(data: encoded, encoding: .utf8)!
+        XCTAssertTrue(json.contains("\"dominant_signal\":\"harm\""))
+        let decoded = try GradeCoding.decoder.decode(Grade.self, from: encoded)
+        XCTAssertEqual(decoded.dominantSignal, .harm)
+        XCTAssertNil(decoded.signals, "a harm grade without signals still decodes")
+        XCTAssertEqual(decoded, grade)
+    }
+
+    func testHarmGradeWithTypesafeSignalsDecodes() throws {
+        let json = """
+        {
+          "schema_version": 1,
+          "phase": "pre",
+          "turn": 3,
+          "timestamp": "2026-09-19T00:00:00Z",
+          "scores": {
+            "confidence": {"value": 8, "rationale": "x"},
+            "atomicity": {"value": 8, "rationale": "x"},
+            "drift": {"value": 1, "rationale": "x"},
+            "pollution": {"value": 2, "rationale": "x"}
+          },
+          "tokens_used": 100,
+          "tokens_limit": 200000,
+          "dominant_signal": "harm",
+          "summary_update": "x",
+          "signals": {"backend": "typesafe", "destructive": 0.99, "bypass": 0.97, "severity": 2.1}
+        }
+        """.data(using: .utf8)!
+        let grade = try GradeCoding.decoder.decode(Grade.self, from: json)
+        XCTAssertEqual(grade.schemaVersion, 1)
+        XCTAssertEqual(grade.dominantSignal, .harm)
+        XCTAssertEqual(grade.signals?.destructive, 0.99)
+        XCTAssertEqual(grade.signals?.bypass, 0.97)
+        XCTAssertEqual(grade.signals?.severity, 2.1)
+    }
+
     func testUnknownFieldsAreIgnored() throws {
         // §4 contract: unknown fields must not error.
         let json = """

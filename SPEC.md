@@ -186,7 +186,7 @@ A single grade. Always reflects the most recent grade event (whether `pre` or `p
 - `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*. `tokens_limit` is the session model's context window, resolved per grade by `plugin/lib/context_window.sh` (§5.4), never a constant; `tokens_used ≤ tokens_limit` always holds.
 - `model` — optional string, additive. The session's Claude model id as read from the last non-`<synthetic>` assistant record of the transcript (`claude-fable-5-1`, `claude-haiku-4-5-20251001`), or `null` when no transcript was readable. Not the grader's model (that is `signals.model`).
 - `limit_source` — optional string, additive. Where `tokens_limit` came from: `"override"` (`CONTEXTBUDDY_CONTEXT_WINDOW`), `"autocompact"` (Claude Code's auto-compact window), `"model"` (prefix table), `"observed"` (evidence floor), `"default"` (200000 fallback). See §5.4.
-- `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), or sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), or `null` (no state-changing signal).
+- `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), the sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), `"harm"` (when `signals.destructive` or `signals.bypass` reached the harm threshold and drove attention state — `typesafe` backend only, §5.4), or `null` (no state-changing signal). The hooks clear any other value to `null` before writing the grade.
 - `summary_update` — the rolling ~200-token summary maintained by the grader. Reflects state after this turn.
 - `signals` — optional object, backend-specific. Emitted by the `typesafe` backend only; absent for `anthropic`, `ollama` and `openai_compatible`. Every field inside is optional and consumers must tolerate new ones (§13). Known fields: `backend`, `model`, `is_task`, `task_gated`, `intent` (`choice`, `probabilities` map, `confidence`), `is_correction`, `destructive`, `bypass`, `severity`, `masses` (`confidence_low`, `atomicity_low`, `drift_high`, `pollution_high`). Surfaced in the popover's "Why this grade" disclosure (§9.3).
   - Note for consumers: the keys of `intent.probabilities` are data, not schema. Swift's `.convertFromSnakeCase` does not rewrite dictionary keys, so they arrive verbatim (`fix_bug`, not `fixBug`).
@@ -234,7 +234,7 @@ Append-only JSONL written by the buddy. One line per ack or mute event.
 {"timestamp": "2026-04-29T11:43:08Z", "turn": 14, "action": "mute", "signal": "atomicity", "scope": "session"}
 ```
 
-`action` is `"ack"` or `"mute"`. `signal` matches the `dominant_signal` field on the grade being ack'd/muted, including the `"loop"` and `"context_pressure"` sentinels. `scope` is `"session"` (mute only this session) or `"persistent"` (mute across all future sessions until cleared) — v1 only emits `"session"`; persistent mute is v2.
+`action` is `"ack"` or `"mute"`. `signal` matches the `dominant_signal` field on the grade being ack'd/muted, including the `"loop"`, `"context_pressure"`, and `"harm"` sentinels. `scope` is `"session"` (mute only this session) or `"persistent"` (mute across all future sessions until cleared) — v1 only emits `"session"`; persistent mute is v2.
 
 ### 4.7 `state.db` (SQLite)
 
@@ -345,7 +345,7 @@ When multiple conditions could fire, precedence is (highest to lowest):
 
 1. `heart` (transient feedback, always wins briefly)
 2. `dizzy` (behavioral red flag)
-3. `attention` (score-driven warning)
+3. `attention` (score-driven warning, or the `harm` sentinel — §5.4)
 4. `celebrate` (positive feedback, transient)
 5. `busy`
 6. `idle`
@@ -365,6 +365,8 @@ Two distinct triggers, both of which set `dominant_signal` to a sentinel value:
 - **Context pressure**: `tokens_used / tokens_limit > context_pressure_pct / 100`. `dominant_signal: "context_pressure"`.
 
 The plugin computes both and sets `dominant_signal` accordingly. The grader prompt does not need to know about these — they are mechanical, not semantic.
+
+**Harm (attention, not dizzy).** A third sentinel, `"harm"`, is set by the `typesafe` grader in code (`plugin/grader/jev.mjs mapAnswers`), not by the hooks: when `signals.destructive` or `signals.bypass` is at or above `[grader.typesafe] harm_action` (default `0.7` — the `HARM_ACTION` constant in `jev.mjs`, the guardrails cookbook's "action" threshold), `dominant_signal` is `"harm"` regardless of the four rubric values. The loop and context-pressure overrides above still win. The buddy maps `harm` to `attention` (§5.2), and the hooks append a `harm` section to `suggestions.md` naming which signal reached the threshold and the severity. Harm is typesafe-only, and the hooks enforce it rather than trust it: `"harm"` passes the same `dominant_signal` allowlist as the other six values (§4.1), but is kept only when the grade's own `signals.destructive` or `signals.bypass` is a number at or above the resolved `harm_action`. A grade from any other backend, or a typesafe grade whose signals never cross the threshold, has the sentinel cleared to `null` with a stderr note — LLM graders never see `signals` and are forbidden from emitting `"harm"` (`plugin/grader/system_prompt.md`), so this closes the same prompt-injection gap §4.1's allowlist exists for. Harm is advisory: the hooks exit 0 and nothing blocks or edits the prompt.
 
 **Token usage.** Hook payloads carry no usage either, so `tokens_used` is measured by the hooks from the transcript at `transcript_path`: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` of the last `type: "assistant"` record carrying `usage` whose model is not `<synthetic>` (`plugin/lib/transcript.sh transcript_window`, the same arithmetic as `grader/jev.mjs parseTranscript`). That count is what the resolver below floors against. No transcript, or none with assistant usage yet, leaves the grader's `tokens_used` standing and the floor is re-applied against it.
 
@@ -461,7 +463,7 @@ You will write the grader system prompt as a complete, locked artifact at `plugi
 2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), the last N typed prompts verbatim (N = `[grader] sliding_window_turns`, default 3, read from the transcript at `transcript_path` as §10.1 describes — typed prompts only, no assistant replies and no tool calls), prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
 3. **Specify the output schema**: must produce JSON conforming to §4.1 exactly. Include a worked output example (use Worked Example 1 from §8 as the canonical example). Strict JSON only — no preamble, no chain-of-thought, no markdown fences around the output.
 4. **Instruct on rationale tone**: concrete, references turns/files, under ~120 chars, action-mappable where possible.
-5. **Instruct on `dominant_signal`**: set to the dimension whose threshold cross drove a state change, OR `null` if no threshold crossed. Do not set to `"loop"` or `"context_pressure"` — those are set mechanically by the plugin, not the grader.
+5. **Instruct on `dominant_signal`**: set to the dimension whose threshold cross drove a state change, OR `null` if no threshold crossed. Do not set to `"loop"`, `"context_pressure"`, or `"harm"` — those are set mechanically by the plugin, not the grader (`harm` only by the typesafe backend from `signals`, which no LLM grader receives).
 6. **Instruct on `summary_update`**: maintain a rolling summary under ~200 tokens that captures session state, recent direction, and any open issues. Update each grade.
 
 The grader prompt should be model-agnostic in structure (so the same prompt works for Haiku and Sonnet) but it will be primarily called against `claude-haiku-4-5-20251001` for `pre`/`post` grades and `claude-sonnet-4-6` for `/inspect` deep dives. The deep-dive variant additionally produces a `deep_analysis` field with multi-paragraph prose; this is a separate output schema and should be documented as a v1 deliverable too.
@@ -710,7 +712,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
   - Horizontal rule
   - Score meters — one row per dimension (see below)
   - Token economics row
-  - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`)
+  - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`; `harm` has no dominant-rationale line yet — its numbers live in the "Why this grade" harm row below, and a synthesized line is deferred)
   - "Why this grade" disclosure, collapsed by default (see below)
   - Action row: `[Ack]  [Mute "<signal>"]  [Open inspector]` (Mute button hidden in celebrate/heart states)
   - Horizontal rule

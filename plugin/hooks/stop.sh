@@ -70,6 +70,27 @@ LOOP_EDITS_IN_WINDOW="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "loop_e
 GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
+# [grader.typesafe].harm_action (issue #7): see user_prompt_submit.sh. Read only to name the
+# firing signals in the suggestions.md harm section below.
+HARM_ACTION="$(toml_get_section_float "$CONFIG_PATH" "grader.typesafe" "harm_action" 0.7)"
+
+# This turn's window, token count and edited files come from the JSONL transcript at
+# hook.transcript_path; the payload carries none of them (issue #9, lib/transcript.sh).
+# The window is the [grader] sliding_window_turns the typesafe job also reads
+# (lib/job.sh), default 3. On post the window keeps this turn's prompt last. A missing
+# or unreadable transcript is an empty window plus a stderr warning, never a skip.
+WINDOW_TURNS="$(toml_get_section_int "$CONFIG_PATH" "grader" "sliding_window_turns" 3)"
+TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
+WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" "$WINDOW_TURNS")"
+TOKENS_USED_TX="$(tokens_used_from_window "$WINDOW_JSON")"
+
+# Context window for this session (issue #47, lib/context_window.sh): model from the
+# transcript tail, limit from the override / auto-compact window / model table, floored
+# against the transcript count above so used <= limit always. Resolved once: the
+# "## tokens" line the LLM backends copy, the typesafe job and the grade written below
+# all carry this one pair.
+CTX="$(resolve_context_window "$TRANSCRIPT_PATH" "$TOKENS_USED_TX")"
+TOKENS_LINE="$(tokens_line_from_context "$CTX")"
 
 # This turn's window, token count and edited files come from the JSONL transcript at
 # hook.transcript_path; the payload carries none of them (issue #9, lib/transcript.sh).
@@ -166,17 +187,34 @@ if command -v jq >/dev/null 2>&1; then
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
   # dominant_signal is model output. SPEC §4.1 allows exactly four dimension names plus the
-  # two mechanical sentinels or null; anything else is cleared here so a prompt-injected
-  # grader cannot steer the suggestions lookup below (the string used to be spliced into a
-  # jq program, which turned it into code).
+  # loop, context_pressure and harm sentinels or null; anything else is cleared here so a
+  # prompt-injected grader cannot steer the suggestions lookup below (the string used to be
+  # spliced into a jq program, which turned it into code).
   DOM_RAW="$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')"
   case "$DOM_RAW" in
-    ''|confidence|atomicity|drift|pollution|loop|context_pressure) ;;
+    ''|confidence|atomicity|drift|pollution|loop|context_pressure|harm) ;;
     *)
       log_err "dominant_signal not one of the allowed values; cleared"
       GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = null')"
       ;;
   esac
+
+  # harm is typesafe-only (SPEC §5.4): the allowlist above accepts the string from any
+  # backend, so an LLM grader could still set dominant_signal "harm" with no signals
+  # evidence to force the attention state (issue #55 exists for the same reason on the
+  # dimension names). Keep it only when a numeric signals.destructive or signals.bypass
+  # is at or above the resolved harm_action; otherwise clear it before it reaches
+  # suggestions.md or last.json.
+  if [ "$DOM_RAW" = "harm" ]; then
+    NEW="$(printf '%s' "$GRADE_JSON" | jq -c --argjson t "$HARM_ACTION" '
+      (.signals.destructive // null) as $d | (.signals.bypass // null) as $b
+      | if (($d|type) == "number" and $d >= $t) or (($b|type) == "number" and $b >= $t)
+        then . else .dominant_signal = null end
+    ' 2>/dev/null)" && [ -n "$NEW" ] && GRADE_JSON="$NEW"
+    if [ "$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')" != "harm" ]; then
+      log_err "dominant_signal harm has no signals evidence at or above harm_action ($HARM_ACTION); cleared"
+    fi
+  fi
 
   # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): the
   # transcript's tokens_used and the per-model, floored tokens_limit from lib/context_window.sh
@@ -197,7 +235,7 @@ if command -v jq >/dev/null 2>&1; then
     && [ -n "$NEW" ] && GRADE_JSON="$NEW"
 
   # Mechanically override dominant_signal: loop wins over context_pressure
-  # which wins over the grader's dimension choice.
+  # which wins over the grader's dimension or harm choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
   else
@@ -228,6 +266,19 @@ if command -v jq >/dev/null 2>&1; then
           "$LOOP_EDITS_IN_WINDOW" "$LOOP_WINDOW"
       elif [ "$DOMINANT" = "context_pressure" ]; then
         printf '**Pattern**: context pressure exceeded %s%%.\n\n' "$CONTEXT_PRESSURE_PCT"
+      elif [ "$DOMINANT" = "harm" ]; then
+        # Issue #7: name the signals that reached harm_action and the severity. Nothing from
+        # the prompt is read here, and a grade without a signals block still gets a section.
+        HARM_LINE="$(printf '%s' "$GRADE_JSON" | jq -r --argjson t "$HARM_ACTION" '
+          def pct: (. * 100 | round | tostring) + "%";
+          def one_dp: (. * 10 | round) as $n | "\($n / 10 | floor).\($n % 10)";
+          ([(.signals.destructive | numbers | select(. >= $t) | "destructive \(pct)"),
+            (.signals.bypass | numbers | select(. >= $t) | "bypass \(pct)")]
+           | if length == 0 then "harm set by the grader with no signal at threshold"
+             else "\(join(", ")) at or above \($t | pct)" end)
+          + "; severity \([.signals.severity | numbers] | if length == 0 then "n/a" else "\(.[0] | one_dp)/3" end)."
+        ' 2>/dev/null)"
+        printf '**Pattern**: %s\n\n' "${HARM_LINE:-harm signal (details unavailable)}"
       else
         RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r --arg d "$DOMINANT" '.scores[$d].rationale // .summary_update')"
         printf '**Issue**: %s\n\n' "$RATIONALE"

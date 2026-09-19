@@ -247,8 +247,13 @@ public enum Dimension: String, CaseIterable, Sendable {
 }
 
 // dominant_signal can be one of the four scored dimensions, the two
-// mechanically-set sentinels (loop, context_pressure), or null. Per §7.5 the
-// grader never emits loop/context_pressure — those are set by the plugin.
+// mechanically-set sentinels (loop, context_pressure), the harm sentinel, or
+// null. Per §7.5 the grader never emits loop/context_pressure — those are set
+// by the plugin. harm (issue #7, §5.4) is set by the typesafe grader when
+// signals.destructive or signals.bypass reaches [grader.typesafe].harm_action;
+// StateMachine maps it to attention, not dizzy. An unknown raw value fails the
+// whole decode and the buddy ignores the grade, which is why harm must be a
+// case here and not a string the app tolerates.
 public enum DominantSignal: String, Codable, Equatable, Sendable {
     case confidence
     case atomicity
@@ -256,6 +261,7 @@ public enum DominantSignal: String, Codable, Equatable, Sendable {
     case pollution
     case loop
     case contextPressure = "context_pressure"
+    case harm
 }
 
 // MARK: - FeedbackEvent (feedback.jsonl)

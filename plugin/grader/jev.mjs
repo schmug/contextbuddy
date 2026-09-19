@@ -377,16 +377,25 @@ export function buildState({ anchorYaml, firstPrompt, recentPrompts, prompt, las
 //
 // value       round(score × 2.5): a 0-4 five-level Score onto the rubric's 0-10.
 // rationale   the description of the most probable level (Jev returns no prose), ≤120 chars.
-// dominant    the same value-vs-threshold rule the Swift state machine applies, in the
-//             precedence system_prompt.md fixes: atomicity > confidence > drift > pollution.
-//             It is NOT decided from probability mass: the buddy renders `value`, and a label
-//             the icon does not agree with would be worse than none. The masses are reported
-//             in `signals` for the follow-up that teaches the buddy to use them.
+// dominant    `harm` when destructive or bypass is at or above the harm threshold (issue #7:
+//             HARM_ACTION, or [grader.typesafe].harm_action from the job), ahead of the four
+//             dimensions; otherwise the same value-vs-threshold rule the Swift state machine
+//             applies, in the precedence system_prompt.md fixes: atomicity > confidence >
+//             drift > pollution. It is NOT decided from probability mass: the buddy renders
+//             `value`, and a label the icon does not agree with would be worse than none. The
+//             masses are reported in `signals` for the follow-up that teaches the buddy to use
+//             them. hooks/stop.sh still overrides any of this with loop / context_pressure.
 // signals     extra top-level object (§4 says unknown fields are ignored) carrying is_task,
 //             intent distribution, correction and harm probabilities, and threshold masses.
 const RATIONALE_MAX = 120
 const FIRST_PROMPT_PREFIX = '(anchor: first prompt) '
 const DIMENSIONS = ['confidence', 'atomicity', 'drift', 'pollution']
+// The guardrails cookbook's "action" threshold: destructive or bypass at or above it makes
+// `harm` the dominant signal. A constant, not a config key of its own (see the config-keys
+// issue): it is the default when the job carries no harm_action, and
+// [grader.typesafe].harm_action (lib/job.sh) overrides it per install. The hooks read that
+// same key to name the firing signals in suggestions.md.
+export const HARM_ACTION = 0.7
 
 const toValue = score => Math.max(0, Math.min(10, Math.round((Number(score) || 0) * 2.5)))
 const levelValue = level => toValue(level)
@@ -423,7 +432,7 @@ export function carryPollution(prior) {
   return { value: prior.value, rationale: fit(`(carried from turn ${prior.turn}) ${bare}`) }
 }
 
-export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokensLimit, limitSource, sessionModel, pollution, thresholds, anchorFromPrompt, model }) {
+export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokensLimit, limitSource, sessionModel, pollution, thresholds, anchorFromPrompt, model, harmAction = HARM_ACTION }) {
   const a = answers
   const rat = (answer, anchored) => fit((anchorFromPrompt && anchored ? FIRST_PROMPT_PREFIX : '') + levelText(answer))
   const scores = {
@@ -439,7 +448,9 @@ export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokens
     drift: scores.drift.value > t.drift_attention,
     pollution: scores.pollution.value > t.pollution_attention,
   }
-  const dominant_signal = ['atomicity', 'confidence', 'drift', 'pollution'].find(d => crossed[d]) || null
+  // Number(undefined) is NaN and NaN >= x is false, so an absent probability is never harm.
+  const harm = Number(a.destructive.noul) >= harmAction || Number(a.bypass.noul) >= harmAction
+  const dominant_signal = harm ? 'harm' : (['atomicity', 'confidence', 'drift', 'pollution'].find(d => crossed[d]) || null)
   const intent = a.intent
   const signals = {
     backend: 'typesafe',
@@ -563,13 +574,14 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
     phase,
   })
 
-  // Issue #8: [grader.typesafe].endpoint and task_gate arrive in the job (lib/job.sh);
-  // TYPESAFE_BASE_URL in the environment still overrides the endpoint. harm_action rides
-  // along for the hooks; nothing here acts on it yet.
+  // Issue #8: [grader.typesafe].endpoint, task_gate and harm_action arrive in the job
+  // (lib/job.sh); TYPESAFE_BASE_URL in the environment still overrides the endpoint.
+  // harm_action is the harm threshold mapAnswers applies (issue #7), HARM_ACTION when absent.
   const baseUrl = env.TYPESAFE_BASE_URL || (typeof job.endpoint === 'string' && job.endpoint ? job.endpoint : undefined)
   const schemeError = endpointSchemeError(baseUrl || DEFAULT_BASE_URL)
   if (schemeError) throw new GraderError(2, `${schemeError} — grader skipped`)
   const taskGate = typeof job.task_gate === 'number' ? job.task_gate : 0.5
+  const harmAction = typeof job.harm_action === 'number' ? job.harm_action : HARM_ACTION
   const response = await request({ state, model: job.model || 'jev-1.13.0', key, fetchImpl, baseUrl })
   const answers = response.answers
   if (isTaskGated(answers, taskGate)) return { gated: true, is_task: answers.is_task.noul, usage: response.usage }
@@ -584,7 +596,7 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
     answers, phase, turn: job.turn, timestamp: job.timestamp,
     tokensUsed: window.tokensUsed, tokensLimit: cw.tokens_limit, limitSource: cw.limit_source,
     sessionModel: window.model || (typeof job.session_model === 'string' ? job.session_model : null),
-    pollution, thresholds,
+    pollution, thresholds, harmAction,
     anchorFromPrompt: chooseAnchor({ anchorYaml: job.session_md, firstPrompt: window.firstPrompt || prompt }).source === 'first_prompt',
     model: response.model || job.model,
   })

@@ -70,8 +70,8 @@ public struct ScoreMeter: Equatable, Sendable {
     public let status: ScoreStatus
     // True when this dimension is the grade's dominant_signal — the score
     // that drove the current state. False for every meter when the dominant
-    // signal is a mechanical sentinel (loop / context_pressure), which no
-    // score caused.
+    // signal is a mechanical sentinel (loop / context_pressure / harm), which
+    // no score caused.
     public let isDriver: Bool
 
     public static let scale = 10
