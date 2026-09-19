@@ -35,6 +35,11 @@ write_session_meta "$PROJECT_HASH" "$PWD" 2>/dev/null \
 
 HOOK_PAYLOAD="$(cat || true)"
 
+# Context window for this session (issue #47): model from the transcript tail, limit from
+# the override / auto-compact window / model table. Resolved once; build_job embeds it in
+# the typesafe job and the grade written below is stamped with the same values.
+CTX="$(context_window_for_payload "$HOOK_PAYLOAD")"
+
 if ! acquire_lock "$PROJECT_HASH" "write"; then
   log_err "could not acquire write lock; skipping grade"
   exit 0
@@ -116,7 +121,7 @@ fi
 
 # Job file for the typesafe backend (see user_prompt_submit.sh).
 build_job "post" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
-  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" \
+  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" "$CTX" \
   > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
 
 GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
@@ -148,13 +153,37 @@ if command -v jq >/dev/null 2>&1; then
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
+  # dominant_signal is model output. SPEC §4.1 allows exactly four dimension names plus the
+  # two mechanical sentinels or null; anything else is cleared here so a prompt-injected
+  # grader cannot steer the suggestions lookup below (the string used to be spliced into a
+  # jq program, which turned it into code).
+  DOM_RAW="$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')"
+  case "$DOM_RAW" in
+    ''|confidence|atomicity|drift|pollution|loop|context_pressure) ;;
+    *)
+      log_err "dominant_signal not one of the allowed values; cleared"
+      GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = null')"
+      ;;
+  esac
+
+  # Context window per session model (issue #47). The backend's tokens_limit is replaced
+  # by the resolved one (override > autocompact > model table > default), the evidence
+  # floor is re-applied against the tokens_used the grader reported so no grade ever
+  # carries tokens_used > tokens_limit, and model / limit_source are recorded.
+  TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
+  CTX_MODEL="$(printf '%s' "$CTX" | jq -r '.model // empty')"
+  # shellcheck disable=SC2046  # two space-separated words by construction
+  set -- $(context_window_floor "$TOKENS_USED" "$(printf '%s' "$CTX" | jq -r '.tokens_limit')" "$(printf '%s' "$CTX" | jq -r '.limit_source')")
+  TOKENS_LIMIT="$1"; LIMIT_SOURCE="$2"
+  GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c \
+    --argjson lim "$TOKENS_LIMIT" --arg src "$LIMIT_SOURCE" --arg model "$CTX_MODEL" \
+    '.tokens_limit = $lim | .limit_source = $src | .model = (if $model == "" then null else $model end)')"
+
   # Mechanically override dominant_signal: loop wins over context_pressure
   # which wins over the grader's dimension choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
   else
-    TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
-    TOKENS_LIMIT="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_limit // 200000')"
     if [ "$TOKENS_LIMIT" -gt 0 ] && \
        [ "$(( TOKENS_USED * 100 / TOKENS_LIMIT ))" -gt "$CONTEXT_PRESSURE_PCT" ]; then
       GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "context_pressure"')"
@@ -183,7 +212,7 @@ if command -v jq >/dev/null 2>&1; then
       elif [ "$DOMINANT" = "context_pressure" ]; then
         printf '**Pattern**: context pressure exceeded %s%%.\n\n' "$CONTEXT_PRESSURE_PCT"
       else
-        RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r ".scores.${DOMINANT}.rationale // .summary_update")"
+        RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r --arg d "$DOMINANT" '.scores[$d].rationale // .summary_update')"
         printf '**Issue**: %s\n\n' "$RATIONALE"
       fi
       printf 'Status: open\n'
