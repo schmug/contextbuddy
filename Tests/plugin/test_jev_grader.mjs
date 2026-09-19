@@ -199,6 +199,25 @@ test('mapAnswers reports no dominant signal when every value is inside its thres
   assert.equal(g.scores.atomicity.value, 10)
 })
 
+// Issue #7: destructive or bypass at or above the action threshold makes `harm` the dominant
+// signal ahead of every rubric dimension. Below it the rubric rule stands unchanged, and the
+// scores and signals are the same either way — harm only takes the dominant slot.
+test('mapAnswers selects harm as dominant_signal when destructive or bypass reaches the action threshold, above the rubric dimensions', () => {
+  const map = (answers, over = {}) => grader.mapAnswers({ answers, phase: 'pre', turn: 1, timestamp: 't', tokensUsed: 0, tokensLimit: 200000, pollution: { value: 0, rationale: 'r' }, thresholds, anchorFromPrompt: false, model: 'm', ...over })
+  assert.equal(grader.HARM_ACTION, 0.7, 'the guardrails cookbook action threshold, a constant not a config key')
+  assert.equal(map(ex1.answers).dominant_signal, 'atomicity', 'ex1: destructive 1% and bypass 3% leave the rubric choice')
+  const destructive = structuredClone(ex1.answers); destructive.destructive.noul = 0.99
+  const g = map(destructive)
+  assert.equal(g.dominant_signal, 'harm', 'harm beats the atomicity cross ex1 carries')
+  assert.equal(g.scores.atomicity.value, 3, 'scores are untouched')
+  assert.equal(g.signals.destructive, 0.99)
+  const bypass = structuredClone(ex1.answers); bypass.bypass.noul = 0.7
+  assert.equal(map(bypass).dominant_signal, 'harm', 'the threshold is inclusive')
+  const below = structuredClone(ex1.answers); below.destructive.noul = 0.69; below.bypass.noul = 0.69
+  assert.equal(map(below).dominant_signal, 'atomicity', 'just under the threshold is not harm')
+  assert.equal(map(below, { harmAction: 0.5 }).dominant_signal, 'harm', 'a caller-supplied threshold replaces the constant')
+})
+
 test('mapAnswers marks anchor-dependent rationales as judged against the first prompt when session.md is missing and keeps them under 120 chars', () => {
   const g = grader.mapAnswers({ answers: ex1.answers, phase: 'pre', turn: 1, timestamp: 't', tokensUsed: 0, tokensLimit: 200000, pollution: { value: 0, rationale: 'no prior grade' }, thresholds, anchorFromPrompt: true, model: 'm' })
   assert.ok(g.scores.drift.rationale.startsWith('(anchor: first prompt) '), g.scores.drift.rationale)
@@ -302,6 +321,21 @@ test('grade gates on job.task_gate and sends the request to job.endpoint unless 
   const overridden = {}
   await grader.grade(baseJob({ endpoint: 'http://127.0.0.1:1/base' }), { fetchImpl: fakeFetch(ex1, { capture: overridden }), env: { ...env, TYPESAFE_BASE_URL: 'http://127.0.0.1:2' } })
   assert.equal(overridden.url, 'http://127.0.0.1:2/v1/systemone')
+})
+
+// Issue #7: [grader.typesafe].harm_action (lib/job.sh) is the harm threshold; a job without it
+// uses HARM_ACTION. Nothing about harm reaches the request, so the same fake response serves.
+test('grade takes the harm threshold from job.harm_action and falls back to HARM_ACTION', async () => {
+  const hot = structuredClone(ex1); hot.answers.destructive.noul = 0.8
+  const r = await grader.grade(baseJob(), { fetchImpl: fakeFetch(hot), env })
+  assert.equal(r.grade.dominant_signal, 'harm', '0.8 reaches the 0.7 default')
+  assert.equal(r.grade.signals.destructive, 0.8)
+  const strict = await grader.grade(baseJob({ harm_action: 0.9 }), { fetchImpl: fakeFetch(hot), env })
+  assert.equal(strict.grade.dominant_signal, 'atomicity', '0.8 is below a 0.9 harm_action')
+  const lax = await grader.grade(baseJob({ harm_action: 0.01 }), { fetchImpl: fakeFetch(ex1), env })
+  assert.equal(lax.grade.dominant_signal, 'harm', 'ex1 destructive 1% reaches a 0.01 harm_action')
+  for (const d of grader.DIMENSIONS) assert.ok(r.grade.scores[d].rationale.length <= 120, d)
+  assert.ok(!JSON.stringify(r.grade).includes('fix the auth bug'), 'no prompt text in the grade')
 })
 
 // A single POST to a fixed path has no legitimate redirect; following one would forward the

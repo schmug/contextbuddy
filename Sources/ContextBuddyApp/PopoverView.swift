@@ -294,7 +294,9 @@ struct PopoverView: View {
         case .atomicity: return grade.scores.atomicity.rationale
         case .drift: return grade.scores.drift.rationale
         case .pollution: return grade.scores.pollution.rationale
-        case .loop, .contextPressure: return nil
+        // harm (issue #7) has no rubric rationale; the harm numbers are in
+        // harmRow. A synthesized harm line is a popover change, not this one.
+        case .loop, .contextPressure, .harm: return nil
         }
     }
 

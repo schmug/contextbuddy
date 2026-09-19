@@ -186,7 +186,7 @@ A single grade. Always reflects the most recent grade event (whether `pre` or `p
 - `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*. `tokens_limit` is the session model's context window, resolved per grade by `plugin/lib/context_window.sh` (§5.4), never a constant; `tokens_used ≤ tokens_limit` always holds.
 - `model` — optional string, additive. The session's Claude model id as read from the last non-`<synthetic>` assistant record of the transcript (`claude-fable-5-1`, `claude-haiku-4-5-20251001`), or `null` when no transcript was readable. Not the grader's model (that is `signals.model`).
 - `limit_source` — optional string, additive. Where `tokens_limit` came from: `"override"` (`CONTEXTBUDDY_CONTEXT_WINDOW`), `"autocompact"` (Claude Code's auto-compact window), `"model"` (prefix table), `"observed"` (evidence floor), `"default"` (200000 fallback). See §5.4.
-- `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), or sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), or `null` (no state-changing signal).
+- `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), the sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), `"harm"` (when `signals.destructive` or `signals.bypass` reached the harm threshold and drove attention state — `typesafe` backend only, §5.4), or `null` (no state-changing signal). The hooks clear any other value to `null` before writing the grade.
 - `summary_update` — the rolling ~200-token summary maintained by the grader. Reflects state after this turn.
 - `signals` — optional object, backend-specific. Emitted by the `typesafe` backend only; absent for `anthropic`, `ollama` and `openai_compatible`. Every field inside is optional and consumers must tolerate new ones (§13). Known fields: `backend`, `model`, `is_task`, `task_gated`, `intent` (`choice`, `probabilities` map, `confidence`), `is_correction`, `destructive`, `bypass`, `severity`, `masses` (`confidence_low`, `atomicity_low`, `drift_high`, `pollution_high`). Surfaced in the popover's "Why this grade" disclosure (§9.3).
   - Note for consumers: the keys of `intent.probabilities` are data, not schema. Swift's `.convertFromSnakeCase` does not rewrite dictionary keys, so they arrive verbatim (`fix_bug`, not `fixBug`).
@@ -344,7 +344,7 @@ When multiple conditions could fire, precedence is (highest to lowest):
 
 1. `heart` (transient feedback, always wins briefly)
 2. `dizzy` (behavioral red flag)
-3. `attention` (score-driven warning)
+3. `attention` (score-driven warning, or the `harm` sentinel — §5.4)
 4. `celebrate` (positive feedback, transient)
 5. `busy`
 6. `idle`
@@ -364,6 +364,8 @@ Two distinct triggers, both of which set `dominant_signal` to a sentinel value:
 - **Context pressure**: `tokens_used / tokens_limit > context_pressure_pct / 100`. `dominant_signal: "context_pressure"`.
 
 The plugin computes both and sets `dominant_signal` accordingly. The grader prompt does not need to know about these — they are mechanical, not semantic.
+
+**Harm (attention, not dizzy).** A third sentinel, `"harm"`, is set by the `typesafe` grader in code (`plugin/grader/jev.mjs mapAnswers`), not by the hooks: when `signals.destructive` or `signals.bypass` is at or above `[grader.typesafe] harm_action` (default `0.7` — the `HARM_ACTION` constant in `jev.mjs`, the guardrails cookbook's "action" threshold), `dominant_signal` is `"harm"` regardless of the four rubric values. The loop and context-pressure overrides above still win. The buddy maps `harm` to `attention` (§5.2), and the hooks append a `harm` section to `suggestions.md` naming which signal reached the threshold and the severity. Grades from the other backends carry no `signals` and never set `harm`; the hooks accept only the seven `dominant_signal` values §4.1 names and clear anything else. Harm is advisory: the hooks exit 0 and nothing blocks or edits the prompt.
 
 **Token usage.** Hook payloads carry no usage either, so `tokens_used` is measured by the hooks from the transcript at `transcript_path`: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` of the last `type: "assistant"` record carrying `usage` whose model is not `<synthetic>` (`plugin/lib/transcript.sh transcript_window`, the same arithmetic as `grader/jev.mjs parseTranscript`). That count is what the resolver below floors against. No transcript, or none with assistant usage yet, leaves the grader's `tokens_used` standing and the floor is re-applied against it.
 

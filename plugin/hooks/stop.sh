@@ -66,6 +66,9 @@ LOOP_EDITS_IN_WINDOW="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "loop_e
 GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
+# [grader.typesafe].harm_action (issue #7): see user_prompt_submit.sh. Read only to name the
+# firing signals in the suggestions.md harm section below.
+HARM_ACTION="$(toml_get_section_float "$CONFIG_PATH" "grader.typesafe" "harm_action" 0.7)"
 
 # This turn's window, token count and edited files come from the JSONL transcript at
 # hook.transcript_path; the payload carries none of them (issue #9, lib/transcript.sh).
@@ -162,12 +165,12 @@ if command -v jq >/dev/null 2>&1; then
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
   # dominant_signal is model output. SPEC §4.1 allows exactly four dimension names plus the
-  # two mechanical sentinels or null; anything else is cleared here so a prompt-injected
-  # grader cannot steer the suggestions lookup below (the string used to be spliced into a
-  # jq program, which turned it into code).
+  # loop, context_pressure and harm sentinels or null; anything else is cleared here so a
+  # prompt-injected grader cannot steer the suggestions lookup below (the string used to be
+  # spliced into a jq program, which turned it into code).
   DOM_RAW="$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')"
   case "$DOM_RAW" in
-    ''|confidence|atomicity|drift|pollution|loop|context_pressure) ;;
+    ''|confidence|atomicity|drift|pollution|loop|context_pressure|harm) ;;
     *)
       log_err "dominant_signal not one of the allowed values; cleared"
       GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = null')"
@@ -193,7 +196,7 @@ if command -v jq >/dev/null 2>&1; then
     && [ -n "$NEW" ] && GRADE_JSON="$NEW"
 
   # Mechanically override dominant_signal: loop wins over context_pressure
-  # which wins over the grader's dimension choice.
+  # which wins over the grader's dimension or harm choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
   else
@@ -224,6 +227,19 @@ if command -v jq >/dev/null 2>&1; then
           "$LOOP_EDITS_IN_WINDOW" "$LOOP_WINDOW"
       elif [ "$DOMINANT" = "context_pressure" ]; then
         printf '**Pattern**: context pressure exceeded %s%%.\n\n' "$CONTEXT_PRESSURE_PCT"
+      elif [ "$DOMINANT" = "harm" ]; then
+        # Issue #7: name the signals that reached harm_action and the severity. Nothing from
+        # the prompt is read here, and a grade without a signals block still gets a section.
+        HARM_LINE="$(printf '%s' "$GRADE_JSON" | jq -r --argjson t "$HARM_ACTION" '
+          def pct: (. * 100 | round | tostring) + "%";
+          def one_dp: (. * 10 | round) as $n | "\($n / 10 | floor).\($n % 10)";
+          ([(.signals.destructive | numbers | select(. >= $t) | "destructive \(pct)"),
+            (.signals.bypass | numbers | select(. >= $t) | "bypass \(pct)")]
+           | if length == 0 then "harm set by the grader with no signal at threshold"
+             else "\(join(", ")) at or above \($t | pct)" end)
+          + "; severity \([.signals.severity | numbers] | if length == 0 then "n/a" else "\(.[0] | one_dp)/3" end)."
+        ' 2>/dev/null)"
+        printf '**Pattern**: %s\n\n' "${HARM_LINE:-harm signal (details unavailable)}"
       else
         RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r --arg d "$DOMINANT" '.scores[$d].rationale // .summary_update')"
         printf '**Issue**: %s\n\n' "$RATIONALE"

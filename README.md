@@ -373,7 +373,7 @@ export TYPESAFE_API_KEY=...        # or whatever api_key_env names, in the envir
 # optional: export CONTEXTBUDDY_NODE=/path/to/node   # if node is not on the hook's PATH
 ```
 
-Environment variables keep working as overrides, so an install configured before the section existed needs no change. `task_gate` and `harm_action` travel to the grader in the job file the hooks write (`plugin/lib/job.sh`); `harm_action` is recorded there for the hooks and nothing acts on it yet.
+Environment variables keep working as overrides, so an install configured before the section existed needs no change. `task_gate` and `harm_action` travel to the grader in the job file the hooks write (`plugin/lib/job.sh`); `harm_action` is the threshold at which `jev.mjs` sets `dominant_signal: "harm"` (destructive or bypass at or above it; the buddy shows `attention`), and the hooks read the same key to name the firing signals in the `suggestions.md` harm section.
 
 How it differs from the LLM backends:
 
@@ -381,7 +381,7 @@ How it differs from the LLM backends:
 - **Rationales are the winning level's text.** Jev writes no prose. `summary_update` is a factual one-liner (intent, correction, harm probabilities) assembled in code.
 - **Pollution is counted, not judged.** Re-reads of one file, reads made stale by a later edit, and tool results over 8k characters, from the transcript. Jev does not count reliably, so nothing about context size is asked of it.
 - **Not a prompt, no grade.** An `is_task` question gates the turn: pasted logs, tool output and documents skip grading instead of producing an "attention" the buddy would render.
-- **Extra `signals` field.** Each grade carries a top-level `signals` object (intent distribution, correction, destructive, bypass, severity, threshold probability masses). The app ignores it today; it is there for the next iteration.
+- **Extra `signals` field.** Each grade carries a top-level `signals` object (intent distribution, correction, destructive, bypass, severity, threshold probability masses). The popover's "Why this grade" disclosure shows it, and destructive or bypass at or above `harm_action` makes `harm` the dominant signal.
 
 What leaves the machine: the session anchor, the first prompt, the last three typed prompts, the current prompt and the last assistant reply, each cut to 2,000 characters. Never tool output, never file contents. Metered: Jev is priced per input token (about 2k tokens a turn at $0.042 per million); output is free. The `anthropic`, `ollama` and `openai_compatible` backends now transmit the same last N typed prompts (N = `sliding_window_turns`, default 3) in their input bundle; earlier releases sent them an empty window.
 

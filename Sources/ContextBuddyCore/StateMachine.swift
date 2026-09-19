@@ -63,7 +63,7 @@ public struct StateHistory: Equatable, Sendable {
 // MARK: - StateTransition
 //
 // Logged to state.db (§4.7) on every state change. `trigger` format follows
-// §4.7's examples: e.g., "atomicity<4", "loop", "context_pressure",
+// §4.7's examples: e.g., "atomicity<4", "loop", "context_pressure", "harm",
 // "celebrate_5", "idle_timeout", "all_clear", "open_turn".
 
 public struct StateTransition: Equatable, Sendable {
@@ -164,6 +164,12 @@ public enum StateMachine {
             derived = .dizzy
             trigger = "context_pressure"
             dominant = .contextPressure
+        } else if grade.dominantSignal == .harm {
+            // Issue #7: the typesafe grader's harm sentinel (§5.4). Advisory:
+            // attention, not dizzy, and ahead of the four rubric dimensions.
+            derived = .attention
+            trigger = "harm"
+            dominant = .harm
         } else if let crossing = firstCrossedThreshold(grade.scores, cfg: cfg.thresholds) {
             derived = .attention
             trigger = crossing.triggerString

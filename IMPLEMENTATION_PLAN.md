@@ -85,7 +85,7 @@ This confirms §3 and proposes three additions (called out inline).
 
 ### `Sources/ContextBuddyCore/`
 
-- **`Schemas.swift`** — `Codable` value types: `Grade` (one per §4.1, used for `last.json`, history lines, and per-turn snapshots — they share a schema), `Score`, `Phase` (`pre`/`post`), `DominantSignal` enum (the four dimensions + `loop` + `context_pressure` + `null`), `FeedbackEvent` (§4.6), `SessionAnchor` (§4.4), `Config` (§4.8), `EditRecord` (for `edits.jsonl`, see §3 addition #1). Decoding ignores unknown fields (§4 rule). Phase-aware: `pollution` rationale prefix `"(carried from turn N)"` is data, not parsed specially.
+- **`Schemas.swift`** — `Codable` value types: `Grade` (one per §4.1, used for `last.json`, history lines, and per-turn snapshots — they share a schema), `Score`, `Phase` (`pre`/`post`), `DominantSignal` enum (the four dimensions + `loop` + `context_pressure` + `harm` + `null`), `FeedbackEvent` (§4.6), `SessionAnchor` (§4.4), `Config` (§4.8), `EditRecord` (for `edits.jsonl`, see §3 addition #1). Decoding ignores unknown fields (§4 rule). Phase-aware: `pollution` rationale prefix `"(carried from turn N)"` is data, not parsed specially.
 - **`Watcher.swift`** — Wraps `FSEventStreamCreate` watching `~/.claude/inspector/sessions/`. Emits `(projectHash, lastJsonURL)` events. Debounces ~50 ms to coalesce atomic-rename pairs (write-temp + rename triggers two events). Re-parses `last.json` on each event; ignores partial/malformed reads.
 - **`StateMachine.swift`** — Pure function `nextState(prev: BuddyState, grade: Grade, history: StateHistory, cfg: Config) -> Transition`. Implements §5 precedence and the celebrate consecutive-counter (lives in `StateHistory`). `heart` is set imperatively from `Core.recordFeedback(.ack, …)` and decays on a timer; the state machine here only handles grade-driven transitions.
 - **`SessionDiscovery.swift`** — Computes `sha256(absolute_path)[:12]`. Lists `sessions/*/last.json` by mtime for MRU. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`.
@@ -164,6 +164,7 @@ Each row below is one test. State machine is pure → table-driven `XCTest` with
 | Celebrate auto-decays after ~2.5 s | (use injectable clock) | reverts to derived state |
 | Dizzy on `dominant_signal == "loop"` | grade with sentinel | state == `dizzy` |
 | Dizzy on `dominant_signal == "context_pressure"` | grade with sentinel | state == `dizzy` |
+| Attention on `dominant_signal == "harm"` (issue #7) | grade with sentinel, any scores | state == `attention`, dominant == `harm` |
 | Dizzy clears when neither signal present | prev=dizzy, fresh grade with null | state == `idle` |
 | Heart wins precedence | prev=attention, ack fired | state == `heart` for ~3 s |
 | Heart reverts to derived state | after timer | state == grade-derived |
