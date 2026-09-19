@@ -64,16 +64,33 @@ final class SessionDiscoveryTests: XCTestCase {
     }
 
     func testListSessionsHandlesMissingLastJson() throws {
+        // An ungraded session still lists (nil lastUpdated, no crash) and takes
+        // its place in the MRU order from its directory mtime. Older than the
+        // graded session here, so it still sorts last.
         _ = makeSession(named: "withjson", lastJsonAge: 30)
-        try FileManager.default.createDirectory(
-            at: root.appendingPathComponent("nojson"),
-            withIntermediateDirectories: true
-        )
+        makeUngradedSession(named: "nojson", directoryAge: 60)
         let discovery = SessionDiscovery(sessionsRoot: root)
         let sessions = discovery.listSessions()
-        XCTAssertEqual(sessions.first?.projectHash, "withjson")
-        XCTAssertEqual(sessions.last?.projectHash, "nojson")
+        XCTAssertEqual(sessions.map(\.projectHash), ["withjson", "nojson"])
         XCTAssertNil(sessions.last?.lastUpdated)
+        XCTAssertNotNil(sessions.last?.directoryModified)
+    }
+
+    func testListSessionsFreshUngradedOutranksStaleGraded() throws {
+        // Issue #5 reproducer: a session that has not received its first grade
+        // (session.md + empty turns/, no last.json) was created just now; the
+        // other project's session was graded a week ago. MRU must resolve to
+        // the fresh one, or the menubar watches the wrong project.
+        let aWeek: TimeInterval = 604_800
+        _ = makeSession(named: "stalegraded_", lastJsonAge: aWeek)
+        makeUngradedSession(named: "freshungrade", directoryAge: 5)
+
+        let discovery = SessionDiscovery(sessionsRoot: root)
+        XCTAssertEqual(
+            discovery.listSessions().map(\.projectHash),
+            ["freshungrade", "stalegraded_"]
+        )
+        XCTAssertEqual(discovery.currentSession(pinnedHash: nil)?.projectHash, "freshungrade")
     }
 
     func testListSessionsEmptyRootReturnsEmpty() {
@@ -185,6 +202,27 @@ final class SessionDiscoveryTests: XCTestCase {
             ofItemAtPath: lastJson.path
         )
         return hash
+    }
+
+    // A session directory the plugin has laid out but never graded: session.md
+    // and an empty turns/, no last.json. The directory mtime is set last, since
+    // creating entries inside it would bump it again.
+    private func makeUngradedSession(named hash: String, directoryAge: TimeInterval) {
+        let dir = root.appendingPathComponent(hash)
+        try? FileManager.default.createDirectory(
+            at: dir.appendingPathComponent("turns"),
+            withIntermediateDirectories: true
+        )
+        try? "# session".write(
+            to: dir.appendingPathComponent("session.md"),
+            atomically: true,
+            encoding: .utf8
+        )
+        let when = Date().addingTimeInterval(-directoryAge)
+        try? FileManager.default.setAttributes(
+            [.modificationDate: when],
+            ofItemAtPath: dir.path
+        )
     }
 
     private func writeMeta(hash: String, projectPath: String) {
