@@ -85,7 +85,11 @@ assert_one_line_per_grade() {
 
 PRE_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"UserPromptSubmit","prompt":"hello there"}'
 POST_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop","tool_calls":[]}'
-EDIT_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop","tool_calls":[{"name":"Edit","input":{"file_path":"/tmp/p/same.swift"}}]}'
+# Loop detection reads this turn's Edit/Write tool_use records from the transcript at
+# transcript_path (issue #9); the payload carries no tool calls.
+EDIT_TRANSCRIPT="$TMP/edit.jsonl"
+printf '{"type":"user","message":{"content":"tweak same.swift"}}\n{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"/tmp/p/same.swift"}}]}}\n' > "$EDIT_TRANSCRIPT"
+EDIT_PAYLOAD="$(jq -c -n --arg t "$EDIT_TRANSCRIPT" '{session_id: "s1", transcript_path: $t, cwd: "/tmp/p", hook_event_name: "Stop"}')"
 
 # --- 1. pre-phase context_pressure override (173430/200000 = 86% > 85) ---------------
 stage_grade pre 173430

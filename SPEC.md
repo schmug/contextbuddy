@@ -773,7 +773,7 @@ When popover is focused:
 - Ensures the session directory exists.
 - Records `meta.json` (§4.9) with that same `$PWD`, atomically. Failure is logged and skipped like any other hook error (§13) — the buddy falls back to the hash.
 - Determines the current turn number: advances `turns/.counter` under the write lock (seeded from the max `turns/NNN-*.json`), so a skipped grade still consumes a number.
-- Assembles grader input: session.md, latest prompt (from hook env), last 3 turns verbatim, prior summary from history.jsonl tail.
+- Assembles grader input: session.md, latest prompt (from hook input), last 3 typed prompts verbatim and `tokens_used` from the JSONL transcript at the hook input's `transcript_path` (the payload itself carries no turns or usage), prior summary from history.jsonl tail.
 - Calls Anthropic Messages API with Haiku model, grader system prompt, assembled input.
 - Parses response JSON. Validates conforms to schema §4.1. On parse failure, log error and skip — do not crash the user's session.
 - Writes `turns/NNN-pre.json` atomically.
@@ -783,7 +783,7 @@ When popover is focused:
 - If state would transition to `attention` or `dizzy`, appends a section to `suggestions.md`.
 
 **`hooks/stop.sh`**: identical pipeline but with phase=`post` (including the `meta.json` write, since a Stop can be the first hook to create the session directory). Additionally:
-- Reads the agent's tool calls from the hook input to extract the list of files edited.
+- Reads this turn's `Edit`/`Write`/`MultiEdit` `tool_use` records — the assistant records after the last typed prompt in the transcript at `transcript_path` — to extract the list of files edited. The hook input carries no tool calls.
 - Maintains a rolling edit history (last 5 turns × edited files) in a small file under `sessions/<hash>/edits.jsonl`.
 - Computes loop detection per §5.4 and overrides `dominant_signal` to `"loop"` if triggered.
 - Writes `turns/NNN-post.json`, updates `last.json`, appends history.
