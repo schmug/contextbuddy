@@ -104,6 +104,36 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(snap.projectName, "dmarcheck", "unpin snaps back to the MRU's project")
     }
 
+    func testSnapshotProjectNameIsTheRepoRootResolvedOncePerSessionHash() async throws {
+        // Issue #42 at the Core level. The recorded path sits two levels below
+        // a fabricated checkout, so the name can only come from the walk up to
+        // `.git`. Deleting `.git` between two snapshots then pins the hard
+        // constraint: the walk runs once per session hash, and a later
+        // snapshot reports the cached name without touching the filesystem.
+        // Without the cache the second snapshot would walk again, find no
+        // repository, and fall back to "ContextBuddyCore".
+        let checkout = inspectorRoot.appendingPathComponent("repos/contextbuddy")
+        let gitDirectory = checkout.appendingPathComponent(".git")
+        let recorded = checkout.appendingPathComponent("Sources/ContextBuddyCore")
+        try FileManager.default.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: recorded, withIntermediateDirectories: true)
+        let hash = SessionDiscovery.projectHash(for: recorded.path)
+        try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
+        try writeMeta(hash: hash, projectPath: recorded.path)
+
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        var snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectName, "contextbuddy", "the git root names the project, not the cwd")
+
+        try FileManager.default.removeItem(at: gitDirectory)
+        snap = await core.currentSnapshot()
+        XCTAssertEqual(
+            snap.projectName,
+            "contextbuddy",
+            "resolved once per session hash: a later snapshot never walks the filesystem again"
+        )
+    }
+
     func testSnapshotProjectNameIsNilWithoutMetaJson() async throws {
         let hash = "eeeeeeeeeeee"
         try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
