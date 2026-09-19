@@ -21,6 +21,9 @@ State (docs.typesafe.ai/concepts/state): {"anchor", "recent_prompts", "prompt"}.
   prompt          the prompt being submitted, from the hook payload, capped (LATEST_CAP)
 No tool results, no assistant prose. STATE_TOKEN_HARD_CAP is enforced in build_state.
 
+The row also records context_window (issue #47): the session model from the transcript's last
+assistant record and the resolved tokens_limit / limit_source (see resolve_context_window).
+
 Questions: specificity / atomicity / drift as Score, criteria parsed verbatim from the
 rubric tables in system_prompt.md at runtime (load_rubric_criteria); intent as Choice.
 Model pinned to MODEL_ID; never an alias (docs.typesafe.ai/models: pin for stable
@@ -162,6 +165,126 @@ def typed_prompts(transcript_text: str) -> list[str]:
         if text is not None:
             out.append(text)
     return out
+
+
+_SYNTHETIC_MODEL = "<synthetic>"
+
+
+def transcript_context(transcript_text: str | None) -> dict:
+    """{"model", "tokens_used"} from the last assistant record (issue #47). tokens_used is
+    input + cache read + cache creation of the last call, as jev.mjs parseTranscript
+    computes it. "<synthetic>" records (API-error placeholders, zero usage) are skipped for
+    both fields. Mirrors jev.mjs parseTranscript; test_jev_shadow.py pins the parity."""
+    model: str | None = None
+    tokens_used = 0
+    for line in (transcript_text or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict) or rec.get("type") != "assistant":
+            continue
+        message = rec.get("message") or {}
+        if not isinstance(message, dict):
+            continue
+        m = message.get("model")
+        if m == _SYNTHETIC_MODEL:
+            continue
+        if isinstance(m, str) and m:
+            model = m
+        usage = message.get("usage")
+        if isinstance(usage, dict):
+            tokens_used = sum(
+                int(usage.get(k) or 0)
+                for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+            )
+    return {"model": model, "tokens_used": tokens_used}
+
+
+# --- context window (issue #47) ----------------------------------------------------------
+#
+# Same resolution as plugin/lib/context_window.sh and jev.mjs resolveContextWindow, over the
+# shared prefix table plugin/lib/context_windows.json: CONTEXTBUDDY_CONTEXT_WINDOW override >
+# Claude Code's auto-compact window (CLAUDE_CODE_AUTO_COMPACT_WINDOW, else autoCompactWindow
+# in ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json) > model table > 200000; then the evidence
+# floor raises a limit below tokens_used to the next tier (past the last, to tokens_used).
+
+_CONTEXT_WINDOWS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lib", "context_windows.json")
+_CONTEXT_WINDOWS_FALLBACK = {"default": 200000, "tiers": [200000, 1000000], "prefixes": []}
+
+
+def _context_windows() -> dict:
+    try:
+        with open(_CONTEXT_WINDOWS_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return dict(_CONTEXT_WINDOWS_FALLBACK)
+
+
+def parse_token_count(value) -> int | None:
+    """500k / 500000 / 1m -> int; None when unparseable or zero."""
+    if value is None:
+        return None
+    text = re.sub(r"[\s_,]", "", str(value)).lower()
+    m = re.fullmatch(r"(\d+)([km]?)", text)
+    if not m:
+        return None
+    n = int(m.group(1)) * {"k": 1000, "m": 1000000, "": 1}[m.group(2)]
+    return n if n > 0 else None
+
+
+def context_window_for_model(model: str | None, env: dict | None = None) -> int:
+    table = _context_windows()
+    env = os.environ if env is None else env
+    window = int(table.get("default", 200000))
+    if isinstance(model, str) and model:
+        for row in table.get("prefixes", []):
+            if model.startswith(row.get("prefix", "\0")):
+                window = int(row.get("window", window))
+                break
+    if env.get(table.get("disable_1m_env", "CLAUDE_CODE_DISABLE_1M_CONTEXT")) in ("1", "true") and window > int(table.get("default", 200000)):
+        window = int(table.get("default", 200000))
+    return window
+
+
+def _autocompact_window(env: dict, home: str) -> int | None:
+    value = env.get("CLAUDE_CODE_AUTO_COMPACT_WINDOW")
+    if not value:
+        path = os.path.join(env.get("CLAUDE_CONFIG_DIR") or os.path.join(home, ".claude"), "settings.json")
+        try:
+            with open(path, encoding="utf-8") as f:
+                value = (json.load(f) or {}).get("autoCompactWindow")
+        except (OSError, ValueError, AttributeError):
+            value = None
+    return parse_token_count(value)
+
+
+def resolve_context_window(model: str | None, tokens_used: int, env: dict | None = None,
+                           home: str | None = None) -> dict:
+    """{"tokens_limit", "limit_source"}; limit_source is override | autocompact | model |
+    observed | default."""
+    env = os.environ if env is None else env
+    home = os.path.expanduser("~") if home is None else home
+    table = _context_windows()
+    default = int(table.get("default", 200000))
+    override = parse_token_count(env.get("CONTEXTBUDDY_CONTEXT_WINDOW"))
+    compact = None if override else _autocompact_window(env, home)
+    if override:
+        limit, source = override, "override"
+    elif compact:
+        limit, source = compact, "autocompact"
+    elif isinstance(model, str) and model:
+        limit, source = context_window_for_model(model, env), "model"
+    else:
+        limit, source = default, "default"
+    used = int(tokens_used or 0)
+    if used > limit:
+        limit = next((int(t) for t in table.get("tiers", []) if int(t) >= used), used)
+        source = "observed"
+    return {"tokens_limit": limit, "limit_source": source}
 
 
 # --- state -----------------------------------------------------------------------------
@@ -342,7 +465,7 @@ def wait_for_haiku(turn_file: str, *, timeout_s: float = HAIKU_WAIT_S, poll_s: f
 
 def build_row(*, turn: int, timestamp: str, session_id: str | None, prompt_id: str | None,
               project_hash: str, model_requested: str, response: dict, latency_ms: int,
-              state_meta: dict, haiku: dict | None) -> dict:
+              state_meta: dict, haiku: dict | None, context: dict | None = None) -> dict:
     questions: dict[str, dict] = {}
     for qid, a in response.get("answers", {}).items():
         if a.get("type") == "score":
@@ -390,6 +513,8 @@ def build_row(*, turn: int, timestamp: str, session_id: str | None, prompt_id: s
         },
         "questions": questions,
         "haiku": haiku,
+        # Issue #47: session model and resolved window, for calibration against the Haiku grade.
+        "context_window": context,
     }
 
 
@@ -454,6 +579,8 @@ def run(args: argparse.Namespace) -> int:
             transcript_text = f.read()
 
     state, meta = build_state(transcript_text, prompt)
+    ctx = transcript_context(transcript_text)
+    ctx.update(resolve_context_window(ctx["model"], ctx["tokens_used"]))
     questions = build_questions(load_rubric_criteria(args.system_prompt))
     response, latency_ms = call_jev(state, questions, api_key=api_key, model=args.model)
 
@@ -463,7 +590,7 @@ def run(args: argparse.Namespace) -> int:
         turn=args.turn, timestamp=args.timestamp, session_id=payload.get("session_id"),
         prompt_id=payload.get("prompt_id"), project_hash=args.project_hash,
         model_requested=args.model, response=response, latency_ms=latency_ms,
-        state_meta=meta, haiku=haiku,
+        state_meta=meta, haiku=haiku, context=ctx,
     )
     write_row(args.session_dir, args.turn, row)
     _log(

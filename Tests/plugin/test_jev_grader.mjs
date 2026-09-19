@@ -50,9 +50,52 @@ test('parseTranscript skips slash-command records so a /command cannot become th
   assert.equal(w.firstPrompt, 'Refactor the auth module to use JWT instead of session cookies. Use jose.')
 })
 
-test('parseTranscript sums the last assistant usage into tokensUsed', () => {
+test('parseTranscript sums the last assistant usage into tokensUsed, ignoring a trailing <synthetic> record', () => {
   const w = grader.parseTranscript(transcriptText, { windowTurns: 3 })
   assert.equal(w.tokensUsed, 60200)
+})
+
+// Issue #47: the session model comes from the transcript (hook payloads carry none).
+test('parseTranscript reports the model of the last non-synthetic assistant record', () => {
+  const w = grader.parseTranscript(transcriptText, { windowTurns: 3 })
+  assert.equal(w.model, 'claude-fable-5-1')
+  assert.equal(grader.parseTranscript('{"type":"user","message":{"content":"x"}}').model, null)
+  const synthOnly = '{"type":"assistant","message":{"model":"<synthetic>","usage":{"input_tokens":0}}}'
+  assert.equal(grader.parseTranscript(synthOnly).model, null)
+  const haikuThenSynth = '{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","usage":{"input_tokens":5}}}\n' + synthOnly
+  assert.equal(grader.parseTranscript(haikuThenSynth).model, 'claude-haiku-4-5-20251001')
+  assert.equal(grader.parseTranscript(haikuThenSynth).tokensUsed, 5)
+})
+
+test('contextWindowForModel reads the shared prefix table and honours CLAUDE_CODE_DISABLE_1M_CONTEXT', () => {
+  for (const m of ['claude-fable-5-1', 'claude-mythos-5-1', 'claude-sonnet-5', 'claude-opus-5', 'claude-opus-4-8', 'claude-opus-4-7-20260301']) {
+    assert.equal(grader.contextWindowForModel(m, {}), 1000000, m)
+  }
+  for (const m of ['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6', 'claude-sonnet-4-5-20250929', 'claude-nova-9', '', null]) {
+    assert.equal(grader.contextWindowForModel(m, {}), 200000, String(m))
+  }
+  assert.equal(grader.contextWindowForModel('claude-fable-5-1', { CLAUDE_CODE_DISABLE_1M_CONTEXT: '1' }), 200000)
+})
+
+test('resolveContextWindow: override > autocompact > model > default, then the evidence floor', () => {
+  const settings = JSON.stringify({ autoCompactWindow: '500k' })
+  const readFile = p => { if (String(p).endsWith('/cfg/settings.json')) return settings; throw new Error('ENOENT') }
+  const r = (over) => grader.resolveContextWindow({ model: 'claude-fable-5-1', tokensUsed: 176474, env: {}, readFile, home: '/nowhere', ...over })
+  assert.deepEqual(r({}), { tokens_limit: 1000000, limit_source: 'model' })
+  assert.deepEqual(r({ model: 'claude-haiku-4-5-20251001' }), { tokens_limit: 200000, limit_source: 'model' })
+  assert.deepEqual(r({ model: null }), { tokens_limit: 200000, limit_source: 'default' })
+  assert.deepEqual(r({ env: { CONTEXTBUDDY_CONTEXT_WINDOW: '300000' } }), { tokens_limit: 300000, limit_source: 'override' })
+  assert.deepEqual(r({ env: { CONTEXTBUDDY_CONTEXT_WINDOW: '300k', CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' } }), { tokens_limit: 300000, limit_source: 'override' })
+  assert.deepEqual(r({ env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: '500k' } }), { tokens_limit: 500000, limit_source: 'autocompact' })
+  assert.deepEqual(r({ env: { CLAUDE_CONFIG_DIR: '/cfg' } }), { tokens_limit: 500000, limit_source: 'autocompact' })
+  assert.deepEqual(r({ env: { CONTEXTBUDDY_CONTEXT_WINDOW: 'lots' } }), { tokens_limit: 1000000, limit_source: 'model' })
+  // evidence floor
+  assert.deepEqual(r({ model: 'claude-haiku-4-5-20251001', tokensUsed: 250065 }), { tokens_limit: 1000000, limit_source: 'observed' })
+  assert.deepEqual(r({ tokensUsed: 1200000 }), { tokens_limit: 1200000, limit_source: 'observed' })
+  assert.deepEqual(r({ model: 'claude-haiku-4-5-20251001', tokensUsed: 200000 }), { tokens_limit: 200000, limit_source: 'model' })
+  // a hook-resolved base (job.tokens_limit / job.limit_source) is respected, floor still applied
+  assert.deepEqual(r({ resolved: { tokens_limit: 300000, limit_source: 'override' } }), { tokens_limit: 300000, limit_source: 'override' })
+  assert.deepEqual(r({ resolved: { tokens_limit: 200000, limit_source: 'model' }, tokensUsed: 250065 }), { tokens_limit: 1000000, limit_source: 'observed' })
 })
 
 test('parseTranscript tolerates blank and unparseable lines', () => {
@@ -185,7 +228,7 @@ const baseJob = (over = {}) => ({
   hook: { session_id: 's', transcript_path: transcriptPath, cwd: '/tmp/p', prompt: 'fix the auth bug and also refactor the validator and add a test' },
   session_md: 'goal: Refactor auth module to use JWT\nout_of_scope: [frontend/]',
   prior_pollution: { turn: 13, value: 4, rationale: 'three superseded plans' },
-  tokens_limit: 200000, window_turns: 3, model: 'jev-1.13.0', thresholds,
+  tokens_limit: 200000, limit_source: 'model', session_model: 'claude-fable-5-1', window_turns: 3, model: 'jev-1.13.0', thresholds,
   ...over,
 })
 const fakeFetch = (body, { status = 200, capture = {} } = {}) => async (url, init) => {
@@ -202,6 +245,9 @@ test('grade sends one request with every question over a bounded state and retur
   assert.equal(r.grade.dominant_signal, 'atomicity')
   assert.equal(r.grade.scores.pollution.rationale, '(carried from turn 13) three superseded plans')
   assert.equal(r.grade.tokens_used, 60200)
+  assert.equal(r.grade.tokens_limit, 200000, 'the job\'s hook-resolved limit is used as given')
+  assert.equal(r.grade.limit_source, 'model')
+  assert.equal(r.grade.model, 'claude-fable-5-1')
   assert.ok(String(capture.url).endsWith('/v1/systemone'))
   assert.equal(capture.init.headers.Authorization, 'Bearer k-test')
   const body = JSON.parse(capture.init.body)
@@ -244,11 +290,26 @@ test('grade returns gated for the recorded pasted-output response and produces n
   assert.ok(r.is_task < 0.5)
 })
 
+test('grade resolves the window from the transcript model when the job carries no tokens_limit, and floors an impossible one', async () => {
+  const job = baseJob(); delete job.tokens_limit
+  const r = await grader.grade(job, { fetchImpl: fakeFetch(ex1), env })
+  assert.equal(r.grade.tokens_limit, 1000000)
+  assert.equal(r.grade.limit_source, 'model')
+  assert.equal(r.grade.model, 'claude-fable-5-1')
+  const floored = await grader.grade(baseJob({ tokens_limit: 60000, limit_source: 'override' }), { fetchImpl: fakeFetch(ex1), env })
+  assert.equal(floored.grade.tokens_limit, 200000)
+  assert.equal(floored.grade.limit_source, 'observed')
+  assert.ok(floored.grade.tokens_used <= floored.grade.tokens_limit)
+})
+
 test('grade on pre tolerates a missing transcript and still grades the hook prompt', async () => {
   const capture = {}
-  const r = await grader.grade(baseJob({ hook: { transcript_path: '/nonexistent/x.jsonl', prompt: 'p' } }), { fetchImpl: fakeFetch(ex1, { capture }), env })
+  const r = await grader.grade(baseJob({ hook: { transcript_path: '/nonexistent/x.jsonl', prompt: 'p' }, session_model: null }), { fetchImpl: fakeFetch(ex1, { capture }), env })
   assert.equal(JSON.parse(capture.init.body).state.prompt, 'p')
   assert.equal(r.grade.tokens_used, 0)
+  assert.equal(r.grade.model, null, 'no transcript and no hook-resolved model: null')
+  const hookModel = await grader.grade(baseJob({ hook: { transcript_path: '/nonexistent/x.jsonl', prompt: 'p' } }), { fetchImpl: fakeFetch(ex1), env })
+  assert.equal(hookModel.grade.model, 'claude-fable-5-1', 'the hook-resolved session_model is kept when the transcript is unreadable')
 })
 
 test('grade fails with exit code 2 when post phase has no prompt to grade', async () => {
