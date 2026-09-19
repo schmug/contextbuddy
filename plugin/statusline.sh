@@ -5,7 +5,7 @@
 # Must complete in <50 ms — no API calls, only `cat` / `jq`.
 #
 # Output format:
-#   <colored-dot> conf:N atom:N drift:N pol:N ⚡USEDk/LIMITk
+#   <colored-dot> conf:N atom:N drift:N pol:N ⚡USEDk/LIMITk   (1M windows print as 1M)
 
 set -uo pipefail
 
@@ -32,7 +32,7 @@ ATOM="$(printf '%s' "$JSON" | jq -r '.scores.atomicity.value // 0')"
 DRIFT="$(printf '%s' "$JSON" | jq -r '.scores.drift.value // 0')"
 POL="$(printf '%s' "$JSON" | jq -r '.scores.pollution.value // 0')"
 USED="$(printf '%s' "$JSON" | jq -r '.tokens_used // 0')"
-LIMIT="$(printf '%s' "$JSON" | jq -r '.tokens_limit // 200000')"
+LIMIT="$(printf '%s' "$JSON" | jq -r '.tokens_limit // 0')"
 DOMINANT="$(printf '%s' "$JSON" | jq -r '.dominant_signal // empty')"
 
 # Derive color from same logic as StateMachine: loop/context_pressure → orange,
@@ -67,10 +67,18 @@ else
   COLOR="$COLOR_GREEN"
 fi
 
-# Token formatting: e.g., 47k / 200k.
+# Token formatting: 47k / 200k / 1M / 1.5M (same rule as ContextBuddyCore TokenFormat.short).
+# A 1M window is "1M", never "1000k" (issue #47).
 fmt_tokens() {
   local n="$1"
-  if [ "$n" -ge 1000 ]; then
+  if [ "$n" -ge 1000000 ]; then
+    local tenths=$((n / 100000))
+    if [ $((tenths % 10)) -eq 0 ]; then
+      printf '%dM' "$((tenths / 10))"
+    else
+      printf '%d.%dM' "$((tenths / 10))" "$((tenths % 10))"
+    fi
+  elif [ "$n" -ge 1000 ]; then
     printf '%dk' "$((n / 1000))"
   else
     printf '%d' "$n"

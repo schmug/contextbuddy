@@ -44,6 +44,13 @@ final class SchemaTests: XCTestCase {
 
         XCTAssertEqual(grade.phase, .post)
         XCTAssertEqual(grade.dominantSignal, .loop, "plugin-set sentinel must decode")
+        // SPEC §8.3 worked example 3: atomicity is scored on the action's boundary,
+        // not on the retry count (repeats are loop detection's job, §5.4). Pins the
+        // fixture so a drift back to the retry-penalised 6 fails here.
+        XCTAssertEqual(grade.scores.atomicity.value, 9, "example 3 atomicity per the §6 rubric")
+        XCTAssertEqual(grade.scores.confidence.value, 7)
+        XCTAssertEqual(grade.scores.drift.value, 2)
+        XCTAssertEqual(grade.scores.pollution.value, 5)
 
         let reEncoded = try GradeCoding.encoder.encode(grade)
         let reEncodedString = String(data: reEncoded, encoding: .utf8)!
@@ -85,6 +92,47 @@ final class SchemaTests: XCTestCase {
         }
         """.data(using: .utf8)!
         XCTAssertNoThrow(try GradeCoding.decoder.decode(Grade.self, from: json))
+    }
+
+    // Issue #47: the hooks record the session model and where tokens_limit came from.
+    // Both are optional and additive; grades written before #47 carry neither.
+    func testModelAndLimitSourceDecodeWhenPresent() throws {
+        let json = """
+        {
+          "schema_version": 1,
+          "phase": "pre",
+          "turn": 1,
+          "timestamp": "2026-09-19T00:00:00Z",
+          "scores": {
+            "confidence": {"value": 5, "rationale": "x"},
+            "atomicity": {"value": 5, "rationale": "x"},
+            "drift": {"value": 5, "rationale": "x"},
+            "pollution": {"value": 5, "rationale": "x"}
+          },
+          "tokens_used": 176474,
+          "tokens_limit": 1000000,
+          "model": "claude-fable-5-1",
+          "limit_source": "model",
+          "dominant_signal": null,
+          "summary_update": "x"
+        }
+        """.data(using: .utf8)!
+        let grade = try GradeCoding.decoder.decode(Grade.self, from: json)
+        XCTAssertEqual(grade.model, "claude-fable-5-1")
+        XCTAssertEqual(grade.limitSource, "model")
+        XCTAssertEqual(grade.tokensLimit, 1_000_000)
+        let roundTrip = try GradeCoding.decoder.decode(Grade.self, from: GradeCoding.encoder.encode(grade))
+        XCTAssertEqual(roundTrip.model, "claude-fable-5-1")
+        XCTAssertEqual(roundTrip.limitSource, "model")
+    }
+
+    func testModelAndLimitSourceAreNilForOlderGrades() throws {
+        let grade = sampleGrade(phase: .pre, pollutionRationale: "x")
+        XCTAssertNil(grade.model)
+        XCTAssertNil(grade.limitSource)
+        let encoded = String(decoding: try GradeCoding.encoder.encode(grade), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("\"model\""), "nil optionals must be omitted, not written as null")
+        XCTAssertFalse(encoded.contains("limit_source"))
     }
 
     func testFutureSchemaVersionDecodesSoCallersCanWarn() throws {
