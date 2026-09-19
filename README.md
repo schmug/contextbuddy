@@ -371,7 +371,7 @@ How it differs from the LLM backends:
 - **Not a prompt, no grade.** An `is_task` question gates the turn: pasted logs, tool output and documents skip grading instead of producing an "attention" the buddy would render.
 - **Extra `signals` field.** Each grade carries a top-level `signals` object (intent distribution, correction, destructive, bypass, severity, threshold probability masses). The app ignores it today; it is there for the next iteration.
 
-What leaves the machine: the session anchor, the first prompt, the last three typed prompts, the current prompt and the last assistant reply, each cut to 2,000 characters. Never tool output, never file contents. Metered: Jev is priced per input token (about 2k tokens a turn at $0.042 per million); output is free.
+What leaves the machine: the session anchor, the first prompt, the last three typed prompts, the current prompt and the last assistant reply, each cut to 2,000 characters. Never tool output, never file contents. Metered: Jev is priced per input token (about 2k tokens a turn at $0.042 per million); output is free. The `anthropic`, `ollama` and `openai_compatible` backends now transmit the same last N typed prompts (N = `sliding_window_turns`, default 3) in their input bundle; earlier releases sent them an empty window.
 
 ### Recommended local models
 

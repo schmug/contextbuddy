@@ -15,9 +15,9 @@
 #   build_job <phase> <turn> <timestamp> <hook_payload_json> <session_md_path> \
 #             <history_jsonl_path> <config_path> [<context_json>] > job.json
 #
-# <context_json> is the output of context_window_for_payload when the hook has
-# already resolved it (so the job and the grade agree); absent, build_job
-# resolves it from the payload itself.
+# <context_json> is the output of resolve_context_window (context_window_for_payload
+# has the same shape) when the hook has already resolved it, so the job and the
+# grade agree; absent, build_job resolves it from the payload itself.
 #
 # Never errors on missing inputs: absent session.md → null, absent history →
 # null, unparseable payload → {} (the grader then exits 2 and the hook skips).

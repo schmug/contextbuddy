@@ -6,8 +6,9 @@
 #   2. Ensure session dir exists.
 #   3. Read hook payload from stdin.
 #   4. Determine current turn = max(turns/) + 1.
-#   5. Assemble grader input (session.md, latest prompt, last 3 turns
-#      verbatim from hook payload, prior summary, tokens, edited files).
+#   5. Assemble grader input (session.md, latest prompt, the last N typed prompts
+#      (N = [grader] sliding_window_turns, default 3) and token count from the
+#      JSONL transcript at hook.transcript_path, prior summary, edited files).
 #   6. Call grader/invoke.sh with phase=pre.
 #   7. Validate response conforms to §4.1.
 #   8. Mechanically compute dominant_signal (only context_pressure is
@@ -55,11 +56,6 @@ write_session_meta "$PROJECT_HASH" "$PWD" 2>/dev/null \
 
 # Read hook payload (Claude Code passes JSON on stdin).
 HOOK_PAYLOAD="$(cat || true)"
-
-# Context window for this session (issue #47): model from the transcript tail, limit from
-# the override / auto-compact window / model table. Resolved once; build_job embeds it in
-# the typesafe job and the grade written below is stamped with the same values.
-CTX="$(context_window_for_payload "$HOOK_PAYLOAD")"
 
 # Acquire writer lock for the duration of the turn-numbering increment +
 # file writes.
@@ -123,6 +119,26 @@ GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 
+# Turn window and token count come from the JSONL transcript at hook.transcript_path;
+# the payload carries neither (issue #9, lib/transcript.sh). The window is the
+# [grader] sliding_window_turns the typesafe job also reads (lib/job.sh), default 3.
+# The current prompt is dropped from the window when the harness already appended it.
+# A missing or unreadable transcript is an empty window plus a stderr warning, never
+# a skip.
+WINDOW_TURNS="$(toml_get_section_int "$CONFIG_PATH" "grader" "sliding_window_turns" 3)"
+TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
+CURRENT_PROMPT="$(printf '%s' "$HOOK_PAYLOAD" | jq -r '.prompt // ""' 2>/dev/null || true)"
+WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" "$WINDOW_TURNS" "$CURRENT_PROMPT")"
+TOKENS_USED_TX="$(tokens_used_from_window "$WINDOW_JSON")"
+
+# Context window for this session (issue #47, lib/context_window.sh): model from the
+# transcript tail, limit from the override / auto-compact window / model table, floored
+# against the transcript count above so used <= limit always. Resolved once: the
+# "## tokens" line the LLM backends copy, the typesafe job and the grade written below
+# all carry this one pair.
+CTX="$(resolve_context_window "$TRANSCRIPT_PATH" "$TOKENS_USED_TX")"
+TOKENS_LINE="$(tokens_line_from_context "$CTX")"
+
 # Assemble grader input bundle.
 INPUT_FILE="$(mktemp)"
 JOB_FILE="$(mktemp)"
@@ -135,9 +151,9 @@ trap 'rm -f "$INPUT_FILE" "$JOB_FILE"; release_lock "$PROJECT_HASH" "write"' EXI
   printf '## turn\n%s\n\n' "$TURN"
   printf '## timestamp\n%s\n\n' "$TIMESTAMP"
   printf '## prior summary\n%s\n\n' "$(prior_summary "$PROJECT_HASH")"
-  printf '## tokens\n%s\n\n' "$(tokens_from_hook_payload "$HOOK_PAYLOAD")"
-  printf '## last 3 turns (from hook transcript)\n```json\n%s\n```\n\n' \
-    "$(recent_turns_from_hook_payload "$HOOK_PAYLOAD" 3)"
+  printf '## tokens\n%s\n\n' "$TOKENS_LINE"
+  printf '## last %s turns (from hook transcript)\n```json\n%s\n```\n\n' \
+    "$WINDOW_TURNS" "$(prompts_from_window "$WINDOW_JSON")"
   printf '## files edited in last 5 turns\n```json\n%s\n```\n\n' \
     "$(files_edited_recent "$PROJECT_HASH" 5)"
   printf '## latest prompt\n%s\n' "$HOOK_PAYLOAD"
@@ -194,18 +210,26 @@ if command -v jq >/dev/null 2>&1; then
       ;;
   esac
 
-  # Context window per session model (issue #47). The backend's tokens_limit is replaced
-  # by the resolved one (override > autocompact > model table > default), the evidence
-  # floor is re-applied against the tokens_used the grader reported so no grade ever
-  # carries tokens_used > tokens_limit, and model / limit_source are recorded.
-  TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
+  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): tokens_used
+  # from the transcript (lib/transcript.sh), tokens_limit per session model with the
+  # evidence floor (lib/context_window.sh, issue #47). When the transcript carries no
+  # usage yet (count 0) the grader's tokens_used stands and the floor is re-applied
+  # against it, so no grade is ever written with tokens_used > tokens_limit. All four
+  # fields are stamped in one jq call so they can never disagree; `NEW=... &&
+  # GRADE_JSON=$NEW` keeps the validated grade if jq fails rather than leaving GRADE_JSON
+  # empty, which would write an empty last.json, turn file and history line.
+  TOKENS_USED="$TOKENS_USED_TX"
+  [ "$TOKENS_USED" -gt 0 ] 2>/dev/null || TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
+  case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
   CTX_MODEL="$(printf '%s' "$CTX" | jq -r '.model // empty')"
   # shellcheck disable=SC2046  # two space-separated words by construction
   set -- $(context_window_floor "$TOKENS_USED" "$(printf '%s' "$CTX" | jq -r '.tokens_limit')" "$(printf '%s' "$CTX" | jq -r '.limit_source')")
   TOKENS_LIMIT="$1"; LIMIT_SOURCE="$2"
-  GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c \
-    --argjson lim "$TOKENS_LIMIT" --arg src "$LIMIT_SOURCE" --arg model "$CTX_MODEL" \
-    '.tokens_limit = $lim | .limit_source = $src | .model = (if $model == "" then null else $model end)')"
+  NEW="$(printf '%s' "$GRADE_JSON" | jq -c \
+    --argjson used "$TOKENS_USED" --argjson lim "$TOKENS_LIMIT" --arg src "$LIMIT_SOURCE" --arg model "$CTX_MODEL" \
+    '.tokens_used = $used | .tokens_limit = $lim | .limit_source = $src
+     | .model = (if $model == "" then null else $model end)' 2>/dev/null)" \
+    && [ -n "$NEW" ] && GRADE_JSON="$NEW"
 
   # Mechanically compute dominant_signal for context_pressure on pre-phase.
   if [ "$TOKENS_LIMIT" -gt 0 ] && \

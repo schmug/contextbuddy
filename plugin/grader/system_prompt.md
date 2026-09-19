@@ -14,7 +14,7 @@ You receive:
 
 2. **Latest input** — the user's most recent prompt (when `phase` is `pre`) OR the latest completed turn including agent response and tool calls (when `phase` is `post`).
 
-3. **Last 3 turns verbatim** — the three preceding entries from the Claude Code hook's transcript, used as window context for atomicity, drift, and pollution judgments.
+3. **Last N turns** — a JSON array of the last N typed user prompts from the Claude Code hook's transcript (N = `sliding_window_turns`, default 3), oldest first, under a `## last N turns` heading. Typed prompts only: no assistant replies and no tool calls. Used as window context for atomicity, drift, and pollution judgments.
 
 4. **Prior rolling summary** — your previous turn's `summary_update` value, or empty if this is turn 1.
 
@@ -124,7 +124,7 @@ Emit exactly one JSON object. No markdown, no prose, no leading/trailing whitesp
 - `timestamp` — ISO 8601 UTC, the plugin will provide it.
 - `scores.<dim>.value` — integer 0-10.
 - `scores.<dim>.rationale` — concrete, ≤ 120 characters, references turn numbers / file paths / specific phrases from the prompt where applicable. Never abstract.
-- `tokens_used`, `tokens_limit` — copy the two integers from the input's `## tokens` line verbatim (`<used> <limit>`). The plugin resolves the limit per session model (200000 or 1000000, or an override), so never substitute a constant; the plugin overwrites `tokens_limit` anyway.
+- `tokens_used`, `tokens_limit` — copy the two integers from the input's `## tokens` line verbatim (`<used> <limit>`). The plugin measures `tokens_used` from the transcript and resolves the limit per session model (200000 or 1000000, or an override), so never substitute a constant; the plugin overwrites both fields anyway whenever the transcript carries a count (without one, your `tokens_used` stands and only the limit is overwritten).
 - `dominant_signal` — set to **one of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"`** when a single dimension's threshold cross is the reason a state would change, OR `null` if no dimension drove a state change. **Never** emit `"loop"` or `"context_pressure"` — those sentinels are set mechanically by the plugin and will overwrite your value when applicable. When multiple dimensions cross thresholds, use this precedence: `atomicity > confidence > drift > pollution`.
 - `summary_update` — rolling summary capturing session state, recent direction, and any open issues. Target ~200 tokens. Update each grade.
 
