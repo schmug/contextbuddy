@@ -6,7 +6,12 @@ You are rendering a compact timeline of ContextBuddy grades from `history.jsonl`
 
 ## Steps
 
-1. Resolve `$HOME/.claude/inspector/sessions/<project-hash>/history.jsonl` for the current `$PWD`.
+1. Resolve the session directory for the current `$PWD`, resolving symlinks first so the hash matches the hooks (same rule as `plugin/lib/project_hash.sh`):
+   ```bash
+   PROJECT_HASH=$(printf '%s' "$(cd -P -- "$PWD" 2>/dev/null && pwd -P || printf '%s' "$PWD")" | shasum -a 256 | cut -c1-12)
+   SESSION_DIR="$HOME/.claude/inspector/sessions/$PROJECT_HASH"
+   ```
+   The timeline is `$SESSION_DIR/history.jsonl`.
 2. If the file doesn't exist, print "no grades recorded for this project yet" and stop.
 3. Read each line and emit one row per grade, formatted:
    ```

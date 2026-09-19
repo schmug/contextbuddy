@@ -88,7 +88,7 @@ This confirms §3 and proposes three additions (called out inline).
 - **`Schemas.swift`** — `Codable` value types: `Grade` (one per §4.1, used for `last.json`, history lines, and per-turn snapshots — they share a schema), `Score`, `Phase` (`pre`/`post`), `DominantSignal` enum (the four dimensions + `loop` + `context_pressure` + `null`), `FeedbackEvent` (§4.6), `SessionAnchor` (§4.4), `Config` (§4.8), `EditRecord` (for `edits.jsonl`, see §3 addition #1). Decoding ignores unknown fields (§4 rule). Phase-aware: `pollution` rationale prefix `"(carried from turn N)"` is data, not parsed specially.
 - **`Watcher.swift`** — Wraps `FSEventStreamCreate` watching `~/.claude/inspector/sessions/`. Emits `(projectHash, lastJsonURL)` events. Debounces ~50 ms to coalesce atomic-rename pairs (write-temp + rename triggers two events). Re-parses `last.json` on each event; ignores partial/malformed reads.
 - **`StateMachine.swift`** — Pure function `nextState(prev: BuddyState, grade: Grade, history: StateHistory, cfg: Config) -> Transition`. Implements §5 precedence and the celebrate consecutive-counter (lives in `StateHistory`). `heart` is set imperatively from `Core.recordFeedback(.ack, …)` and decays on a timer; the state machine here only handles grade-driven transitions.
-- **`SessionDiscovery.swift`** — Computes `sha256(absolute_path)[:12]`. Lists `sessions/*/last.json` by mtime for MRU, falling back to the session directory's mtime for sessions that have no grade yet. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`.
+- **`SessionDiscovery.swift`** — Computes `sha256(canonicalProjectPath(path))[:12]`, where `canonicalProjectPath(_:)` resolves symlinks with realpath(3) (same precedent as `Watcher.canonicalize`) and returns the input verbatim when it cannot be resolved. Lists `sessions/*/last.json` by mtime for MRU, falling back to the session directory's mtime for sessions that have no grade yet. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`.
 - **`Storage.swift`** — SQLite wrapper around `state.db` (§4.7). Two writers: `recordFeedback` and `recordTransition`. Auto-creates schema. On `SQLITE_CORRUPT` or open failure, deletes file and recreates (§13). No reads in v1 — but expose `enumerateFeedback`/`enumerateTransitions` for the test suite to verify writes.
 - **`Core.swift`** — `public actor BuddyCore`. Composes the above. API:
   - `subscribe() -> AsyncStream<BuddyState>`
@@ -125,7 +125,7 @@ This confirms §3 and proposes three additions (called out inline).
 - **`statusline.sh`** — Reads `last.json`, prints one line in <50 ms, colored leading dot per §10.2. No API calls. No process spawn beyond `cat`/`jq`.
 - **`grader/system_prompt.md`** — The grader prompt I will author. Embeds §6 verbatim, specifies input bundle (§7.2), output schema with Worked Example 1 as the canonical example (§7.3), tone rules (§7.4), `dominant_signal` rules (§7.5 — grader never emits `loop`/`context_pressure`), and `summary_update` rules (§7.6). A second variant (or sibling file `inspect_system_prompt.md`) defines the deep-dive output schema for `/inspect` — see open question Q5.
 - **`grader/invoke.sh`** — POSTs to Anthropic Messages API, parses strict JSON, retries once on transient error, fails silently on 4xx. Reads API key from `ANTHROPIC_API_KEY` env (open question Q4).
-- **`lib/project_hash.sh`** — `printf '%s' "$PWD" | shasum -a 256 | cut -c1-12`. macOS-native (no GNU `sha256sum` dep).
+- **`lib/project_hash.sh`** — `canonical_project_path` (`CDPATH= cd -P && pwd -P`, verbatim fallback) then `printf '%s' "$canonical" | shasum -a 256 | cut -c1-12`. Must agree with the Swift hash for the same directory; both sides pin `sha256("/private/tmp")[:12]` in tests. macOS-native (no GNU `sha256sum` dep).
 - **`lib/session_paths.sh`** — All path helpers derive from `$PROJECT_HASH`. One source of truth.
 - **`lib/transcript.sh`** — Sliding-window assembly. Reads `history.jsonl` tail for prior summary; reads last 3 turns from `turns/` directory verbatim (open question Q6: what does "verbatim" mean given we only have grade JSON, not raw prompts/responses?).
 
@@ -189,7 +189,7 @@ Each row below is one test. State machine is pure → table-driven `XCTest` with
 ### `SessionDiscoveryTests.swift`
 
 - `projectHash("/abs/path")` is deterministic and 12 hex chars.
-- Two distinct paths produce different hashes (no collision in fixture set of 100 random paths).
+- Two distinct directories produce different hashes; two spellings of one directory (a symlink and its target) produce the same hash (`testProjectHashResolvesSymlinksBeforeHashing`); an unresolvable path is hashed verbatim (`testProjectHashHashesUnresolvablePathVerbatim`).
 - MRU returns sessions ordered by `last.json` mtime; a session with no `last.json` yet orders by its directory mtime instead.
 - Pinned session overrides MRU.
 - Empty `~/.claude/inspector/sessions/` → empty MRU, no error.

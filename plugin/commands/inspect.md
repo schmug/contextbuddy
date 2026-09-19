@@ -8,7 +8,8 @@ You are running a ContextBuddy deep-dive grade. This is a Sonnet-class call (slo
 
 1. Resolve project hash and current turn:
    ```bash
-   PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-12)
+   # symlinks resolved first, same as plugin/lib/project_hash.sh (issue #4)
+   PROJECT_HASH=$(printf '%s' "$(cd -P -- "$PWD" 2>/dev/null && pwd -P || printf '%s' "$PWD")" | shasum -a 256 | cut -c1-12)
    SESSION_DIR="$HOME/.claude/inspector/sessions/$PROJECT_HASH"
    TURN=$(ls -1 "$SESSION_DIR/turns" 2>/dev/null | grep -E '^[0-9]{3}-(pre|post)\.json$' | cut -c1-3 | sort -n | tail -1 || printf '0')
    TURN=$((10#${TURN:-0}))
