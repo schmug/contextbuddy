@@ -7,6 +7,8 @@ shape); the transcript from fixtures/transcript_request_a.jsonl. Run with:
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -48,6 +50,97 @@ class TypedPromptsTest(unittest.TestCase):
         first = js.typed_prompts(TRANSCRIPT)[0]
         self.assertNotIn("<system-reminder>", first)
         self.assertTrue(first.startswith("Refactor the auth module"))
+
+
+def _node(script, *args):
+    """Run an ES-module snippet against plugin/grader/jev.mjs. The module path travels in
+    JEV_MJS, never in argv[1]: jev.mjs runs its CLI (and blocks on stdin) when argv[1] is
+    its own path."""
+    env = dict(os.environ, JEV_MJS=os.path.join(REPO, "plugin", "grader", "jev.mjs"))
+    return subprocess.run(
+        ["node", "--input-type=module", "-e", script, "--", *args],
+        capture_output=True, text=True, check=True, env=env, stdin=subprocess.DEVNULL, timeout=30,
+    ).stdout
+
+
+class TranscriptContextTest(unittest.TestCase):
+    """Issue #47: the session model and context size come from the transcript's assistant
+    records; "<synthetic>" records (API-error placeholders, zero usage) are skipped."""
+
+    def test_model_and_tokens_from_last_real_assistant_record(self):
+        self.assertEqual(js.transcript_context(TRANSCRIPT), {"model": "claude-fable-5-1", "tokens_used": 60200})
+
+    def test_synthetic_records_are_skipped(self):
+        synth = json.dumps({"type": "assistant", "message": {"model": "<synthetic>", "usage": {"input_tokens": 0}}})
+        self.assertEqual(js.transcript_context(synth), {"model": None, "tokens_used": 0})
+        haiku = json.dumps({"type": "assistant", "message": {"model": "claude-haiku-4-5-20251001", "usage": {"input_tokens": 5}}})
+        self.assertEqual(js.transcript_context(haiku + "\n" + synth), {"model": "claude-haiku-4-5-20251001", "tokens_used": 5})
+
+    def test_no_transcript(self):
+        self.assertEqual(js.transcript_context(None), {"model": None, "tokens_used": 0})
+        self.assertEqual(js.transcript_context("{not json}\n"), {"model": None, "tokens_used": 0})
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_parity_with_jev_mjs_parse_transcript(self):
+        # Same fixture through both parsers (#31 parity): model and tokens_used must agree.
+        script = (
+            "import {readFileSync} from 'node:fs'; const g = await import(process.env.JEV_MJS);"
+            " const w = g.parseTranscript(readFileSync(process.argv[1], 'utf8'));"
+            " console.log(JSON.stringify({model: w.model, tokens_used: w.tokensUsed}))"
+        )
+        out = _node(script, os.path.join(FIXTURES, "transcript_request_a.jsonl"))
+        self.assertEqual(json.loads(out), js.transcript_context(TRANSCRIPT))
+
+
+class ContextWindowTest(unittest.TestCase):
+    """Issue #47: plugin/lib/context_windows.json, read by the hooks, jev.mjs and this file."""
+
+    def test_prefix_table(self):
+        for m in ("claude-fable-5-1", "claude-mythos-5-1", "claude-sonnet-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7-20260301"):
+            self.assertEqual(js.context_window_for_model(m, env={}), 1000000, m)
+        for m in ("claude-haiku-4-5-20251001", "claude-sonnet-4-6", "claude-opus-4-6", "claude-sonnet-4-5-20250929", "claude-nova-9", "", None):
+            self.assertEqual(js.context_window_for_model(m, env={}), 200000, str(m))
+
+    def test_disable_1m_env_caps_native_1m_models(self):
+        self.assertEqual(js.context_window_for_model("claude-fable-5-1", env={"CLAUDE_CODE_DISABLE_1M_CONTEXT": "1"}), 200000)
+
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_table_parity_with_jev_mjs(self):
+        ids = ["claude-fable-5-1", "claude-haiku-4-5-20251001", "claude-sonnet-5", "claude-opus-4-6", "claude-nova-9"]
+        script = (
+            "const g = await import(process.env.JEV_MJS);"
+            " console.log(JSON.stringify(process.argv.slice(1).map(m => g.contextWindowForModel(m, {}))))"
+        )
+        self.assertEqual(json.loads(_node(script, *ids)), [js.context_window_for_model(m, env={}) for m in ids])
+
+    def test_parse_token_count(self):
+        self.assertEqual(js.parse_token_count("500k"), 500000)
+        self.assertEqual(js.parse_token_count("500K"), 500000)
+        self.assertEqual(js.parse_token_count("1m"), 1000000)
+        self.assertEqual(js.parse_token_count(400000), 400000)
+        self.assertEqual(js.parse_token_count("300000"), 300000)
+        for bad in ("lots", "", None, "0", 0):
+            self.assertIsNone(js.parse_token_count(bad), repr(bad))
+
+    def test_resolution_order_then_floor(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "cfg")
+            os.makedirs(cfg)
+            with open(os.path.join(cfg, "settings.json"), "w", encoding="utf-8") as f:
+                json.dump({"autoCompactWindow": "500k"}, f)
+            r = lambda **kw: js.resolve_context_window(**{"model": "claude-fable-5-1", "tokens_used": 176474, "env": {}, "home": d, **kw})  # noqa: E731
+            self.assertEqual(r(), {"tokens_limit": 1000000, "limit_source": "model"})
+            self.assertEqual(r(model="claude-haiku-4-5-20251001"), {"tokens_limit": 200000, "limit_source": "model"})
+            self.assertEqual(r(model=None), {"tokens_limit": 200000, "limit_source": "default"})
+            self.assertEqual(r(env={"CONTEXTBUDDY_CONTEXT_WINDOW": "300000"}), {"tokens_limit": 300000, "limit_source": "override"})
+            self.assertEqual(r(env={"CONTEXTBUDDY_CONTEXT_WINDOW": "300k", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500k"}), {"tokens_limit": 300000, "limit_source": "override"})
+            self.assertEqual(r(env={"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "500k"}), {"tokens_limit": 500000, "limit_source": "autocompact"})
+            self.assertEqual(r(env={"CLAUDE_CONFIG_DIR": cfg}), {"tokens_limit": 500000, "limit_source": "autocompact"})
+            self.assertEqual(r(env={"CONTEXTBUDDY_CONTEXT_WINDOW": "lots"}), {"tokens_limit": 1000000, "limit_source": "model"})
+            # evidence floor: never a limit below tokens_used
+            self.assertEqual(r(model="claude-haiku-4-5-20251001", tokens_used=250065), {"tokens_limit": 1000000, "limit_source": "observed"})
+            self.assertEqual(r(tokens_used=1200000), {"tokens_limit": 1200000, "limit_source": "observed"})
+            self.assertEqual(r(model="claude-haiku-4-5-20251001", tokens_used=200000), {"tokens_limit": 200000, "limit_source": "model"})
 
 
 class StateBuilderTest(unittest.TestCase):
@@ -182,12 +275,15 @@ HAIKU_TURN = {
 }
 
 
-def _row(haiku=None):
+CONTEXT = {"model": "claude-fable-5-1", "tokens_used": 60200, "tokens_limit": 1000000, "limit_source": "model"}
+
+
+def _row(haiku=None, context=CONTEXT):
     _, meta = js.build_state(TRANSCRIPT, LATEST)
     return js.build_row(
         turn=14, timestamp="2026-09-18T12:00:00Z", session_id="sess", prompt_id="pid",
         project_hash="abc123def456", model_requested=js.MODEL_ID,
-        response=RESPONSE, latency_ms=412, state_meta=meta, haiku=haiku,
+        response=RESPONSE, latency_ms=412, state_meta=meta, haiku=haiku, context=context,
     )
 
 
@@ -234,6 +330,11 @@ class RowSchemaTest(unittest.TestCase):
 
     def test_haiku_null_when_absent(self):
         self.assertIsNone(_row(haiku=None)["haiku"])
+
+    def test_row_carries_context_window(self):
+        # Issue #47: the session model and the resolved window ride along for calibration.
+        self.assertEqual(_row()["context_window"], CONTEXT)
+        self.assertIsNone(_row(context=None)["context_window"])
 
     def test_haiku_scores_copied_when_present(self):
         row = _row(haiku=js.haiku_summary(HAIKU_TURN))

@@ -15,6 +15,9 @@
 # whatever JSON shape Claude Code passes us; the "transcript" key is
 # inspected first and falls through to "messages" / "turns" if shape evolves.
 
+# shellcheck source=context_window.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/context_window.sh"
+
 # read_session_md <hash>
 # Echoes the session.md frontmatter content (between --- fences) or a
 # sentinel string when missing. Q1: frontmatter format uses --- delimiters.
@@ -81,15 +84,16 @@ files_edited_recent() {
 }
 
 # tokens_from_hook_payload <payload_json>
-# Echoes "<used> <limit>" or empty if not present.
+# Echoes "<used> <limit>". <used> is what the payload carries (tokens_used or
+# usage.input_tokens; Claude Code sends neither today, so 0 until issue #9 reads
+# the transcript). <limit> is resolved per session model by lib/context_window.sh
+# (issue #47), the same resolver the hooks stamp into the grade, so the `## tokens`
+# line the LLM backends copy and the grade's tokens_limit always agree.
 tokens_from_hook_payload() {
   local payload="$1"
   if command -v jq >/dev/null 2>&1; then
-    printf '%s' "$payload" | jq -r '
-      (.tokens_used // .usage.input_tokens // 0) as $used
-      | (.tokens_limit // 200000) as $lim
-      | "\($used) \($lim)"'
+    context_window_for_payload "$payload" | jq -r '"\(.tokens_used) \(.tokens_limit)"'
   else
-    printf '0 200000'
+    printf '0 %s' "$CONTEXT_WINDOW_DEFAULT"
   fi
 }

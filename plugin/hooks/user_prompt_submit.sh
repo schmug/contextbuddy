@@ -56,6 +56,11 @@ write_session_meta "$PROJECT_HASH" "$PWD" 2>/dev/null \
 # Read hook payload (Claude Code passes JSON on stdin).
 HOOK_PAYLOAD="$(cat || true)"
 
+# Context window for this session (issue #47): model from the transcript tail, limit from
+# the override / auto-compact window / model table. Resolved once; build_job embeds it in
+# the typesafe job and the grade written below is stamped with the same values.
+CTX="$(context_window_for_payload "$HOOK_PAYLOAD")"
+
 # Acquire writer lock for the duration of the turn-numbering increment +
 # file writes.
 if ! acquire_lock "$PROJECT_HASH" "write"; then
@@ -142,7 +147,7 @@ trap 'rm -f "$INPUT_FILE" "$JOB_FILE"; release_lock "$PROJECT_HASH" "write"' EXI
 # backends ignore it). A build failure leaves {} so the grader exits 2 and
 # this hook logs and skips, never blocks.
 build_job "pre" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
-  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" \
+  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" "$CTX" \
   > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
 
 # Call grader. Failures here are non-fatal.
@@ -176,9 +181,20 @@ if command -v jq >/dev/null 2>&1; then
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
-  # Mechanically compute dominant_signal for context_pressure on pre-phase.
+  # Context window per session model (issue #47). The backend's tokens_limit is replaced
+  # by the resolved one (override > autocompact > model table > default), the evidence
+  # floor is re-applied against the tokens_used the grader reported so no grade ever
+  # carries tokens_used > tokens_limit, and model / limit_source are recorded.
   TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
-  TOKENS_LIMIT="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_limit // 200000')"
+  CTX_MODEL="$(printf '%s' "$CTX" | jq -r '.model // empty')"
+  # shellcheck disable=SC2046  # two space-separated words by construction
+  set -- $(context_window_floor "$TOKENS_USED" "$(printf '%s' "$CTX" | jq -r '.tokens_limit')" "$(printf '%s' "$CTX" | jq -r '.limit_source')")
+  TOKENS_LIMIT="$1"; LIMIT_SOURCE="$2"
+  GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c \
+    --argjson lim "$TOKENS_LIMIT" --arg src "$LIMIT_SOURCE" --arg model "$CTX_MODEL" \
+    '.tokens_limit = $lim | .limit_source = $src | .model = (if $model == "" then null else $model end)')"
+
+  # Mechanically compute dominant_signal for context_pressure on pre-phase.
   if [ "$TOKENS_LIMIT" -gt 0 ] && \
      [ "$(( TOKENS_USED * 100 / TOKENS_LIMIT ))" -gt "$CONTEXT_PRESSURE_PCT" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "context_pressure"')"

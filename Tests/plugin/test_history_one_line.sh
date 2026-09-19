@@ -88,6 +88,8 @@ POST_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/
 EDIT_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop","tool_calls":[{"name":"Edit","input":{"file_path":"/tmp/p/same.swift"}}]}'
 
 # --- 1. pre-phase context_pressure override (173430/200000 = 86% > 85) ---------------
+# The payload names no readable transcript, so lib/context_window.sh resolves the default
+# 200000 window (issue #47); the staged 200000 below is overwritten with that same value.
 stage_grade pre 173430
 rc="$(run_hook "$PRE_HOOK" "$PRE_PAYLOAD")"; GRADES=$((GRADES+1))
 [ "$rc" = "0" ] && ok "pre context_pressure: hook exits 0" || fail "pre context_pressure: hook exit $rc ($(cat "$TMP/hook.err"))"
