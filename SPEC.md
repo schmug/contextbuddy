@@ -354,6 +354,8 @@ Two distinct triggers, both of which set `dominant_signal` to a sentinel value:
 
 The plugin computes both and sets `dominant_signal` accordingly. The grader prompt does not need to know about these — they are mechanical, not semantic.
 
+The token pair is measured, then stamped: the hooks read `tokens_used` from the last assistant `usage` record in the transcript at `transcript_path` and report `tokens_limit` as 200000 (the same literal `lib/job.sh` hands the typesafe job). When `0 < tokens_used <= tokens_limit`, they overwrite both fields of the grade with that pair in one write, so the two can never disagree, and the context-pressure check reads the stamped values. When `tokens_used > tokens_limit`, the limit is unknown for this model (a context window above 200k), not the context full: the grader's token fields stand, the hook writes one `contextbuddy:` warning to stderr, and no `context_pressure` is derived from the transcript that turn. No transcript, or none with assistant usage yet, leaves the grader's fields untouched and the check runs on them. A per-model or configurable `tokens_limit` is a separate issue.
+
 ### 5.5 Celebrate consecutive counting
 
 Maintain a counter: increment on each grade where all four scores ≥7, reset to zero on any grade where any score drops below 7. When counter reaches `celebrate_consecutive_n`, fire celebrate (then continue counting; subsequent celebrates require another `celebrate_consecutive_n` clean grades).
@@ -434,7 +436,7 @@ Pollution is graded only on `post` (Stop) phase. On `pre` (UserPromptSubmit) pha
 You will write the grader system prompt as a complete, locked artifact at `plugin/grader/system_prompt.md`. It must:
 
 1. **Embed §6 verbatim** as the rubric definitions. Do not paraphrase, do not condense, do not "improve" the rubric prose. The exact words in §6 are the IP.
-2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), last 3 turns verbatim, prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
+2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), the last N typed prompts verbatim (N = `[grader] sliding_window_turns`, default 3, read from the transcript at `transcript_path` as §10.1 describes — typed prompts only, no assistant replies and no tool calls), prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
 3. **Specify the output schema**: must produce JSON conforming to §4.1 exactly. Include a worked output example (use Worked Example 1 from §8 as the canonical example). Strict JSON only — no preamble, no chain-of-thought, no markdown fences around the output.
 4. **Instruct on rationale tone**: concrete, references turns/files, under ~120 chars, action-mappable where possible.
 5. **Instruct on `dominant_signal`**: set to the dimension whose threshold cross drove a state change, OR `null` if no threshold crossed. Do not set to `"loop"` or `"context_pressure"` — those are set mechanically by the plugin, not the grader.
@@ -860,6 +862,8 @@ The buddy and the plugin must each fail gracefully when the other is absent or m
 - **Malformed `last.json`**: buddy logs to stderr, retains previous state, continues watching.
 - **Missing `session.md`**: plugin grader prompt notes its absence; scores produced are advisory but flagged with reduced confidence in rationale ("session.md not found — grading against prompt only").
 - **Anthropic API error (rate limit, timeout)**: plugin logs and skips that grade. No file is written. Buddy state remains as-of-previous-grade.
+- **`transcript_path` missing, unreadable, or not a regular file**: the hook grades with an empty turn window and a transcript `tokens_used` of 0 (the grader's own token fields stand), writes one `contextbuddy:` warning to stderr, exits 0, and still writes the grade.
+- **`jq` missing**: `transcript_window` degrades to the same empty window with a `contextbuddy:` warning and the hook continues; exit 0 in every case. On the default `anthropic` backend the grade is still written, unvalidated, because the §4.1 check and the mechanical `dominant_signal` overrides need jq. `ollama` and `openai_compatible` refuse up front in `grader/invoke.sh` and `typesafe` cannot build its job file, so those grades are logged and skipped.
 - **SQLite corruption**: buddy logs error and recreates state.db with empty tables. Feedback events are lost; state.db is best-effort, not durable contract.
 - **Project hash collision**: vanishingly unlikely with 12-char sha256 prefix. Not handled.
 - **`config.toml` malformed**: plugin and buddy fall back to compiled-in defaults (matching the values in §4.8). Log warning.
