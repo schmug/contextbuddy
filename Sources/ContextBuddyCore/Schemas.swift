@@ -359,13 +359,37 @@ public struct Config: Equatable, Sendable {
             }
         }
 
+        // [grader.typesafe] (issue #8). apiKeyEnv is the NAME of the
+        // environment variable holding the key, never the key: the key value
+        // is never written to config.toml or any grade file. taskGate is the
+        // is_task probability below which the typesafe backend skips the turn;
+        // harmAction the destructive/bypass probability the hooks treat as
+        // actionable. Both are unit-interval floats. Consumed by
+        // plugin/lib/job.sh and plugin/grader/invoke.sh; the app only needs to
+        // know the section so the file keeps its thresholds.
+        public struct Typesafe: Equatable, Sendable {
+            public var apiKeyEnv: String
+            public var endpoint: String
+            public var taskGate: Double
+            public var harmAction: Double
+            public init(apiKeyEnv: String, endpoint: String, taskGate: Double, harmAction: Double) {
+                self.apiKeyEnv = apiKeyEnv
+                self.endpoint = endpoint
+                self.taskGate = taskGate
+                self.harmAction = harmAction
+            }
+        }
+
+        public var typesafe: Typesafe
+
         public init(
             backend: String = "anthropic",
             model: String,
             slidingWindowTurns: Int,
             inspectModel: String,
             ollama: Ollama = Ollama(endpoint: "http://localhost:11434"),
-            openaiCompatible: OpenAICompatible = OpenAICompatible(endpoint: "http://localhost:1234/v1", apiKeyEnv: "")
+            openaiCompatible: OpenAICompatible = OpenAICompatible(endpoint: "http://localhost:1234/v1", apiKeyEnv: ""),
+            typesafe: Typesafe = Typesafe(apiKeyEnv: "TYPESAFE_API_KEY", endpoint: "https://api.typesafe.ai", taskGate: 0.5, harmAction: 0.7)
         ) {
             self.backend = backend
             self.model = model
@@ -373,6 +397,7 @@ public struct Config: Equatable, Sendable {
             self.inspectModel = inspectModel
             self.ollama = ollama
             self.openaiCompatible = openaiCompatible
+            self.typesafe = typesafe
         }
     }
 
@@ -410,7 +435,13 @@ public struct Config: Equatable, Sendable {
             slidingWindowTurns: 3,
             inspectModel: "claude-sonnet-4-6",
             ollama: Grader.Ollama(endpoint: "http://localhost:11434"),
-            openaiCompatible: Grader.OpenAICompatible(endpoint: "http://localhost:1234/v1", apiKeyEnv: "")
+            openaiCompatible: Grader.OpenAICompatible(endpoint: "http://localhost:1234/v1", apiKeyEnv: ""),
+            typesafe: Grader.Typesafe(
+                apiKeyEnv: "TYPESAFE_API_KEY",
+                endpoint: "https://api.typesafe.ai",
+                taskGate: 0.5,
+                harmAction: 0.7
+            )
         ),
         ui: UI(animationsEnabled: true, tokenRowPct: 70)
     )
@@ -439,7 +470,8 @@ public extension Config {
 
             if line.hasPrefix("[") && line.hasSuffix("]") {
                 section = String(line.dropFirst().dropLast()).trimmingCharacters(in: .whitespaces)
-                if !["thresholds", "grader", "grader.ollama", "grader.openai_compatible", "ui"].contains(section) {
+                let knownSections = ["thresholds", "grader", "grader.ollama", "grader.openai_compatible", "grader.typesafe", "ui"]
+                if !knownSections.contains(section) {
                     throw ConfigParseError.unknownSection(section)
                 }
                 continue
@@ -494,6 +526,19 @@ public extension Config {
                 default:
                     throw ConfigParseError.unknownKey(section: section, key: key)
                 }
+            case "grader.typesafe":
+                switch key {
+                case "api_key_env":
+                    grader.typesafe.apiKeyEnv = try parseString(valueRaw, section: section, key: key)
+                case "endpoint":
+                    grader.typesafe.endpoint = try parseString(valueRaw, section: section, key: key)
+                case "task_gate":
+                    grader.typesafe.taskGate = try parseDouble(valueRaw, section: section, key: key)
+                case "harm_action":
+                    grader.typesafe.harmAction = try parseDouble(valueRaw, section: section, key: key)
+                default:
+                    throw ConfigParseError.unknownKey(section: section, key: key)
+                }
             case "ui":
                 switch key {
                 case "animations_enabled":
@@ -537,6 +582,14 @@ private func stripComment(_ line: String) -> String {
 private func parseInt(_ value: String, section: String, key: String) throws -> Int {
     if let v = Int(value) { return v }
     throw ConfigParseError.typeMismatch(section: section, key: key, expected: "integer", got: value)
+}
+
+// TOML float or integer literal ("0.5", "1"). Sign, exponent and underscore
+// forms are rejected: the only float keys are unit-interval gates.
+private func parseDouble(_ value: String, section: String, key: String) throws -> Double {
+    let plain = value.allSatisfy { $0.isNumber || $0 == "." }
+    if plain, let v = Double(value) { return v }
+    throw ConfigParseError.typeMismatch(section: section, key: key, expected: "float", got: value)
 }
 
 private func parseBool(_ value: String, section: String, key: String) throws -> Bool {

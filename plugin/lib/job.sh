@@ -6,8 +6,12 @@
 # itself from hook.transcript_path; this file carries only what the transcript
 # does not: phase, turn, timestamp, the raw hook payload, session.md text,
 # the prior grade's pollution (pre-phase carries it forward), thresholds,
-# window size, the Jev model, and the resolved context window (issue #47:
-# tokens_limit, session_model, limit_source from lib/context_window.sh).
+# window size, the Jev model, the resolved context window (issue #47:
+# tokens_limit, session_model, limit_source from lib/context_window.sh), and
+# the [grader.typesafe] endpoint and gates (issue #8: endpoint, task_gate,
+# harm_action). api_key_env stays out of the job: grader/invoke.sh resolves the
+# key and hands it to the child env only, so neither the key nor its variable
+# name is written to a file.
 #
 # Usage:
 #   source plugin/lib/config.sh
@@ -28,7 +32,7 @@
 build_job() {
   local phase="$1" turn="$2" ts="$3" payload="$4" session_md="$5" history="$6" cfg="$7"
   local ctx="${8:-}"
-  local model window ca aa da pa prior
+  local model window ca aa da pa prior endpoint task_gate harm_action
   model="$(toml_get_section_key "$cfg" "grader" "model")"
   model="${model:-jev-1.13.0}"
   window="$(toml_get_section_int "$cfg" "grader" "sliding_window_turns" 3)"
@@ -36,6 +40,11 @@ build_job() {
   aa="$(toml_get_section_int "$cfg" "thresholds" "atomicity_attention" 4)"
   da="$(toml_get_section_int "$cfg" "thresholds" "drift_attention" 6)"
   pa="$(toml_get_section_int "$cfg" "thresholds" "pollution_attention" 7)"
+  # Defaults match Config.defaults in Sources/ContextBuddyCore/Schemas.swift.
+  endpoint="$(toml_get_section_key "$cfg" "grader.typesafe" "endpoint")"
+  endpoint="${endpoint:-https://api.typesafe.ai}"
+  task_gate="$(toml_get_section_float "$cfg" "grader.typesafe" "task_gate" 0.5)"
+  harm_action="$(toml_get_section_float "$cfg" "grader.typesafe" "harm_action" 0.7)"
 
   if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
     payload='{}'
@@ -68,6 +77,8 @@ build_job() {
     --arg model "$model" \
     --argjson ctx "$ctx" \
     --argjson ca "$ca" --argjson aa "$aa" --argjson da "$da" --argjson pa "$pa" \
+    --arg endpoint "$endpoint" \
+    --argjson task_gate "$task_gate" --argjson harm_action "$harm_action" \
     "${sm_arg[@]}" \
     '{
       phase: $phase,
@@ -81,6 +92,9 @@ build_job() {
       limit_source: $ctx.limit_source,
       window_turns: $window,
       model: $model,
+      endpoint: $endpoint,
+      task_gate: $task_gate,
+      harm_action: $harm_action,
       thresholds: {confidence_attention: $ca, atomicity_attention: $aa, drift_attention: $da, pollution_attention: $pa}
     }'
 }

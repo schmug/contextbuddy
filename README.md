@@ -347,19 +347,27 @@ Grades with [TypeSafe's](https://docs.typesafe.ai) Jev, a System One model: it r
 [grader]
 backend = "typesafe"
 model = "jev-1.13.0"
+
+[grader.typesafe]
+api_key_env = "TYPESAFE_API_KEY"     # NAME of the env var holding the key, never the key
+endpoint = "https://api.typesafe.ai"
+task_gate = 0.5                      # is_task probability below which the turn is not graded
+harm_action = 0.7                    # destructive/bypass probability treated as actionable
 ```
 
+Every key is optional and the values above are the defaults. `api_key_env` follows the `openai_compatible` pattern: the key itself lives only in the environment or a `.env`, never in `config.toml`.
+
 ```bash
-export TYPESAFE_API_KEY=...        # in the environment Claude Code inherits,
-                                   # or a TYPESAFE_API_KEY= line in a .env in the
-                                   # project, worktree root, or main checkout
+export TYPESAFE_API_KEY=...        # or whatever api_key_env names, in the environment
+                                   # Claude Code inherits, or a TYPESAFE_API_KEY= line in
+                                   # a .env in the project, worktree root, or main checkout
                                    # (plugin/lib/dotenv.sh; the desktop app's hooks
                                    # see no shell exports, so .env is the route there)
-# optional: export TYPESAFE_BASE_URL=https://api.typesafe.ai
+# optional: export TYPESAFE_BASE_URL=https://api.typesafe.ai   # overrides endpoint
 # optional: export CONTEXTBUDDY_NODE=/path/to/node   # if node is not on the hook's PATH
 ```
 
-No other `config.toml` keys: the menubar app's config parser rejects unknown keys and then ignores the whole file, thresholds included, so the backend is configured through the environment.
+Environment variables keep working as overrides, so an install configured before the section existed needs no change. `task_gate` and `harm_action` travel to the grader in the job file the hooks write (`plugin/lib/job.sh`); `harm_action` is recorded there for the hooks and nothing acts on it yet.
 
 How it differs from the LLM backends:
 

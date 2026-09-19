@@ -290,6 +290,20 @@ test('grade returns gated for the recorded pasted-output response and produces n
   assert.ok(r.is_task < 0.5)
 })
 
+// Issue #8: [grader.typesafe] reaches the grader through the job. task_gate replaces the
+// 0.5 default; endpoint is the request base unless TYPESAFE_BASE_URL overrides it.
+test('grade gates on job.task_gate and sends the request to job.endpoint unless TYPESAFE_BASE_URL overrides it', async () => {
+  const capture = {}
+  const gated = await grader.grade(baseJob({ task_gate: 0.99, endpoint: 'http://127.0.0.1:1/base/' }), { fetchImpl: fakeFetch(ex1, { capture }), env })
+  assert.equal(gated.gated, true, 'is_task 0.98 is below a 0.99 gate')
+  assert.equal(capture.url, 'http://127.0.0.1:1/base/v1/systemone')
+  const open = await grader.grade(baseJob({ task_gate: 0.01 }), { fetchImpl: fakeFetch(pasted), env })
+  assert.equal(open.gated, false, 'is_task 0.05 clears a 0.01 gate')
+  const overridden = {}
+  await grader.grade(baseJob({ endpoint: 'http://127.0.0.1:1/base' }), { fetchImpl: fakeFetch(ex1, { capture: overridden }), env: { ...env, TYPESAFE_BASE_URL: 'http://127.0.0.1:2' } })
+  assert.equal(overridden.url, 'http://127.0.0.1:2/v1/systemone')
+})
+
 test('grade resolves the window from the transcript model when the job carries no tokens_limit, and floors an impossible one', async () => {
   const job = baseJob(); delete job.tokens_limit
   const r = await grader.grade(job, { fetchImpl: fakeFetch(ex1), env })

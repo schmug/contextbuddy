@@ -42,6 +42,17 @@ ctx='{"model":"claude-haiku-4-5-20251001","tokens_used":10,"tokens_limit":200000
 job="$(build_job "pre" 14 "t" "$payload" "$ws/session.md" "$ws/history.jsonl" "$ws/config.toml" "$ctx")"
 check "job takes a pre-resolved context from the hook instead of resolving again" '.tokens_limit==200000 and .session_model=="claude-haiku-4-5-20251001"'
 
+# Issue #8: [grader.typesafe] gates and endpoint travel in the job; the key
+# does not (invoke.sh hands it to the child env only).
+check "job carries the typesafe gate defaults when the section is absent" '.task_gate==0.5 and .harm_action==0.7 and .endpoint=="https://api.typesafe.ai"'
+printf '\n[grader.typesafe]\napi_key_env = "MY_JEV_KEY"\nendpoint = "http://127.0.0.1:8080"\ntask_gate = 0.6\nharm_action = 0.9\n' >> "$ws/config.toml"
+job="$(MY_JEV_KEY=sk-never-in-job build_job "pre" 14 "t" "$payload" "$ws/session.md" "$ws/history.jsonl" "$ws/config.toml")"
+check "job carries task_gate, harm_action and endpoint from [grader.typesafe]" '.task_gate==0.6 and .harm_action==0.9 and .endpoint=="http://127.0.0.1:8080"'
+check "job never carries the API key or its env var name" '(tostring | test("sk-never-in-job") | not) and (has("api_key_env") | not)'
+printf '[grader]\nbackend = "typesafe"\n\n[grader.typesafe]\ntask_gate = "half"\nharm_action = 0.9\n' > "$ws/config.toml"
+job="$(build_job "pre" 14 "t" "$payload" "$ws/session.md" "$ws/history.jsonl" "$ws/config.toml")"
+check "a non-numeric task_gate falls back to the default" '.task_gate==0.5 and .harm_action==0.9'
+
 job="$(build_job "post" 1 "t" "$payload" "$ws/nope.md" "$ws/nohistory.jsonl" "$ws/config.toml")"
 check "missing session.md yields null anchor" '.session_md==null'
 check "missing history yields null prior pollution" '.prior_pollution==null'

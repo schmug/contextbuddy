@@ -58,3 +58,19 @@ toml_get_section_int() {
     printf '%s' "$raw"
   fi
 }
+
+# toml_get_section_float <file> <section> <key> <default>
+# Like toml_get_section_int for an unsigned TOML float or integer literal
+# ("0.5", "1"); falls back to <default> if missing or not of that shape. The
+# result is safe to splice into jq with --argjson. Used for the
+# [grader.typesafe] gates (issue #8).
+toml_get_section_float() {
+  local file="$1" section="$2" key="$3" default="$4"
+  local raw
+  raw="$(toml_get_section_key "$file" "$section" "$key")"
+  if [ -z "$raw" ] || ! printf '%s' "$raw" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+    printf '%s' "$default"
+  else
+    printf '%s' "$raw"
+  fi
+}

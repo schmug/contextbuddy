@@ -282,13 +282,22 @@ loop_window_turns = 3
 context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit per §5.4)
 
 [grader]
+backend = "anthropic"       # anthropic | ollama | openai_compatible | typesafe (README "Grader backends")
 model = "claude-haiku-4-5-20251001"
 sliding_window_turns = 3    # last N turns verbatim
 inspect_model = "claude-sonnet-4-6"
 
+[grader.typesafe]           # used when backend = "typesafe" (issue #8)
+api_key_env = "TYPESAFE_API_KEY"     # name of the env var holding the key; the key is never in this file
+endpoint = "https://api.typesafe.ai"
+task_gate = 0.5             # is_task probability below which the turn is not graded
+harm_action = 0.7           # destructive/bypass probability treated as actionable
+
 [ui]
 animations_enabled = true
 ```
+
+Unknown sections and keys are rejected, and a rejected file falls back to compiled-in defaults as a whole (§13). Adding a key means adding it to `Config.parse` first.
 
 The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required.
 

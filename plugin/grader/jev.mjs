@@ -547,9 +547,14 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
     phase,
   })
 
-  const response = await request({ state, model: job.model || 'jev-1.13.0', key, fetchImpl, baseUrl: env.TYPESAFE_BASE_URL })
+  // Issue #8: [grader.typesafe].endpoint and task_gate arrive in the job (lib/job.sh);
+  // TYPESAFE_BASE_URL in the environment still overrides the endpoint. harm_action rides
+  // along for the hooks; nothing here acts on it yet.
+  const baseUrl = env.TYPESAFE_BASE_URL || (typeof job.endpoint === 'string' && job.endpoint ? job.endpoint : undefined)
+  const taskGate = typeof job.task_gate === 'number' ? job.task_gate : 0.5
+  const response = await request({ state, model: job.model || 'jev-1.13.0', key, fetchImpl, baseUrl })
   const answers = response.answers
-  if (isTaskGated(answers)) return { gated: true, is_task: answers.is_task.noul, usage: response.usage }
+  if (isTaskGated(answers, taskGate)) return { gated: true, is_task: answers.is_task.noul, usage: response.usage }
 
   const pollution = phase === 'pre' ? carryPollution(job.prior_pollution) : mechanicalPollution(text)
   const thresholds = { confidence_attention: 4, atomicity_attention: 4, drift_attention: 6, pollution_attention: 7, ...(job.thresholds || {}) }
