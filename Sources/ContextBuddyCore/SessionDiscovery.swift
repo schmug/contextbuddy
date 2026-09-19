@@ -7,13 +7,17 @@ import CryptoKit
 // writes to `sessions/<project-hash>/`. Project hash is the first 12 hex
 // chars of sha256(absolute_project_path). This module owns:
 //   - the hash function
-//   - listing sessions by MRU (most-recent last.json mtime)
+//   - listing sessions by MRU (most-recent last.json mtime, falling back to
+//     the session directory's mtime while a session has no grade yet)
 //   - resolving "current" session (MRU unless explicitly pinned)
 
 public struct SessionRef: Equatable, Sendable {
     public let projectHash: String
     public let directory: URL
     public let lastUpdated: Date?
+    // mtime of the session directory itself. A session has no last.json until
+    // its first grade lands, so this is the only timestamp a fresh session has.
+    public let directoryModified: Date?
     // Absolute project path from meta.json (§4.9). nil for session dirs the
     // plugin wrote before meta.json existed — the hash is one-way, so there is
     // nothing to fall back on but the hash itself.
@@ -23,17 +27,27 @@ public struct SessionRef: Equatable, Sendable {
         projectHash: String,
         directory: URL,
         lastUpdated: Date?,
+        directoryModified: Date? = nil,
         projectPath: String? = nil
     ) {
         self.projectHash = projectHash
         self.directory = directory
         self.lastUpdated = lastUpdated
+        self.directoryModified = directoryModified
         self.projectPath = projectPath
     }
 
     // Display name for the popover's project footer row.
     public var projectName: String? {
         projectPath.flatMap { SessionDiscovery.projectName(forPath: $0) }
+    }
+
+    // The timestamp MRU orders on: the last grade when there is one, otherwise
+    // the directory mtime (issue #5). Without the fallback a brand-new session
+    // lost to every graded one, however stale, and the buddy watched the wrong
+    // project until the first grade arrived.
+    public var lastActivity: Date? {
+        lastUpdated ?? directoryModified
     }
 }
 
@@ -95,35 +109,44 @@ public struct SessionDiscovery: Sendable {
             .appendingPathComponent(".claude/inspector/sessions", isDirectory: true)
     }
 
-    // List all session directories with their last.json mtime (nil if absent).
-    // Sorted descending by lastUpdated; sessions with no last.json sort last.
+    // List all session directories with their last.json mtime (nil if absent)
+    // and the directory's own mtime. Sorted descending by lastActivity, so an
+    // ungraded session ranks by when its directory was last touched rather
+    // than always last. Equal timestamps fall back to hash order so the
+    // listing is stable from one call to the next.
     public func listSessions() -> [SessionRef] {
         guard let entries = try? FileManager.default.contentsOfDirectory(
             at: sessionsRoot,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: [.skipsHiddenFiles]
         ) else {
             return []
         }
-        let refs: [SessionRef] = entries.compactMap { entry in
+        let refs: [SessionRef] = entries.compactMap { (entry: URL) -> SessionRef? in
             let isDir = (try? entry.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) ?? false
             guard isDir else { return nil }
             let hash = entry.lastPathComponent
             let lastJson = entry.appendingPathComponent("last.json")
             let mtime = (try? lastJson.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
+            let dirMtime = (try? entry.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate)
             return SessionRef(
                 projectHash: hash,
                 directory: entry,
                 lastUpdated: mtime,
+                directoryModified: dirMtime,
                 projectPath: Self.projectPath(inSessionDirectory: entry)
             )
         }
-        return refs.sorted { lhs, rhs in
-            switch (lhs.lastUpdated, rhs.lastUpdated) {
-            case let (l?, r?): return l > r
-            case (nil, nil): return lhs.projectHash < rhs.projectHash
-            case (nil, _): return false
-            case (_, nil): return true
+        return refs.sorted { (lhs: SessionRef, rhs: SessionRef) -> Bool in
+            switch (lhs.lastActivity, rhs.lastActivity) {
+            case let (l?, r?) where l != r:
+                return l > r
+            case (.some, .none):
+                return true
+            case (.none, .some):
+                return false
+            default:
+                return lhs.projectHash < rhs.projectHash
             }
         }
     }
