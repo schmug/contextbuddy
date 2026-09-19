@@ -41,7 +41,9 @@ claude plugin marketplace add /path/to/contextbuddy   # or: schmug/contextbuddy
 claude plugin install contextbuddy@contextbuddy
 ```
 
-A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way.
+A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way. The installed copy is cached by the version in `plugin/.claude-plugin/plugin.json`, so after new commits reinstall it (`claude plugin uninstall contextbuddy@contextbuddy && claude plugin install contextbuddy@contextbuddy`); `claude plugin update` reports up to date and changes nothing.
+
+Working on the plugin or the app? [CLAUDE.md](CLAUDE.md) holds the repo's working agreements for agents, including the live hook run every plugin PR must show.
 
 To verify the plugin manifest:
 
@@ -96,7 +98,7 @@ The buddy aggregates these into seven states. Default thresholds (in `~/.claude/
 | `busy` | UserPromptSubmit fired without a matching Stop yet |
 | `attention` | `confidence<4` or `atomicity<4` or `drift>6` or `pollution>7` |
 | `celebrate` | 5 consecutive grades all-green |
-| `dizzy` | 3 edits to the same file in 3 consecutive turns OR `tokens_used/tokens_limit > 85%` |
+| `dizzy` | 3 edits to the same file in 3 consecutive turns OR `tokens_used/tokens_limit > 85%` (`tokens_limit` is the session model's window, see [Context window](#context-window)) |
 | `heart` | You acked a suggestion |
 
 ---
@@ -215,7 +217,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. Three consecutive edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
@@ -245,7 +247,7 @@ pollution_attention = 7
 celebrate_consecutive_n = 5
 loop_edits_in_window = 3    # N edits to same file in N consecutive turns
 loop_window_turns = 3
-context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy
+context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit: see Context window)
 
 [grader]
 backend = "anthropic"       # "anthropic" | "ollama" | "openai_compatible"
@@ -266,6 +268,18 @@ token_row_pct = 70          # ⚡ row turns orange when usage > this percent
 ```
 
 Both the buddy and the plugin read this on each grade event. Hot-reload is automatic; the buddy also re-reads the file on its 30 s sleep tick, so a `[ui]` edit lands within half a minute even with no grade in flight.
+
+### Context window
+
+`tokens_limit` is resolved per grade from the session's actual model, not hardcoded. Hook payloads carry no model, so the plugin reads `message.model` from the last assistant record of the session transcript (`<synthetic>` placeholder records are skipped). Resolution order, first hit wins; the grade records the winner in `limit_source`:
+
+1. `override` — `CONTEXTBUDDY_CONTEXT_WINDOW` in the environment or a `.env` in the project (same lookup as `CONTEXTBUDDY_CLAUDE_CONFIG_DIR`). Accepts `300000`, `300k`, `1m`. Not a `config.toml` key: the app's parser drops the whole file on an unknown key.
+2. `autocompact` — Claude Code's auto-compact window: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else `autoCompactWindow` in `~/.claude/settings.json` (respects `CLAUDE_CONFIG_DIR`), as written by `/autocompact 500k`. Pressure is measured against the ceiling you will actually hit.
+3. `model` — prefix table in `plugin/lib/context_windows.json`: 1M for `claude-fable-*`, `claude-mythos-*`, `claude-sonnet-5*`, `claude-opus-5*`, `claude-opus-4-8*`, `claude-opus-4-7*`; 200K for Haiku, Sonnet 4.6 / 4.5, Opus 4.6 / 4.5 and any unknown id. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` caps the 1M rows at 200K. `[1m]` variants of Sonnet 4.6 / Opus 4.6 are not detected; they resolve to 200K and rely on step 5.
+4. `default` — no transcript or no model: 200K.
+5. `observed` — evidence floor: if `tokens_used` exceeds the limit from steps 1-4, the assumption is provably wrong and the limit is raised to the next tier (200K → 1M). No grade is ever written with `tokens_used > tokens_limit`.
+
+Every grade also carries `model` (the session's Claude model id, or `null`). The status line and popover print a 1M window as `1M` (`⚡176k/1M`). The same resolver runs in the hooks (all four backends get the same limit), in the typesafe grader and in the Jev shadow grader.
 
 ---
 
@@ -357,7 +371,7 @@ How it differs from the LLM backends:
 - **Not a prompt, no grade.** An `is_task` question gates the turn: pasted logs, tool output and documents skip grading instead of producing an "attention" the buddy would render.
 - **Extra `signals` field.** Each grade carries a top-level `signals` object (intent distribution, correction, destructive, bypass, severity, threshold probability masses). The app ignores it today; it is there for the next iteration.
 
-What leaves the machine: the session anchor, the first prompt, the last three typed prompts, the current prompt and the last assistant reply, each cut to 2,000 characters. Never tool output, never file contents. Metered: Jev is priced per input token (about 2k tokens a turn at $0.042 per million); output is free.
+What leaves the machine: the session anchor, the first prompt, the last three typed prompts, the current prompt and the last assistant reply, each cut to 2,000 characters. Never tool output, never file contents. Metered: Jev is priced per input token (about 2k tokens a turn at $0.042 per million); output is free. The `anthropic`, `ollama` and `openai_compatible` backends now transmit the same last N typed prompts (N = `sliding_window_turns`, default 3) in their input bundle; earlier releases sent them an empty window.
 
 ### Recommended local models
 
@@ -427,7 +441,7 @@ By design (§9.6 / §15):
 
 ```bash
 swift test                    # core (Schemas, StateMachine, Storage, Watcher, …)
-bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hook job builder) + node grader tests
+bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hook job builder, context window resolver, hooks) + node grader tests
 node --test Tests/plugin/test_jev_grader.mjs   # typesafe grader alone (no network; fetch is injected)
 ```
 

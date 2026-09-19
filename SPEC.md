@@ -183,7 +183,9 @@ A single grade. Always reflects the most recent grade event (whether `pre` or `p
 - `timestamp` — ISO 8601 UTC.
 - `scores.<dimension>.value` — integer 0-10 inclusive.
 - `scores.<dimension>.rationale` — string, max ~120 chars, references concrete turns/files where possible.
-- `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*.
+- `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*. `tokens_limit` is the session model's context window, resolved per grade by `plugin/lib/context_window.sh` (§5.4), never a constant; `tokens_used ≤ tokens_limit` always holds.
+- `model` — optional string, additive. The session's Claude model id as read from the last non-`<synthetic>` assistant record of the transcript (`claude-fable-5-1`, `claude-haiku-4-5-20251001`), or `null` when no transcript was readable. Not the grader's model (that is `signals.model`).
+- `limit_source` — optional string, additive. Where `tokens_limit` came from: `"override"` (`CONTEXTBUDDY_CONTEXT_WINDOW`), `"autocompact"` (Claude Code's auto-compact window), `"model"` (prefix table), `"observed"` (evidence floor), `"default"` (200000 fallback). See §5.4.
 - `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), or sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), or `null` (no state-changing signal).
 - `summary_update` — the rolling ~200-token summary maintained by the grader. Reflects state after this turn.
 - `signals` — optional object, backend-specific. Emitted by the `typesafe` backend only; absent for `anthropic`, `ollama` and `openai_compatible`. Every field inside is optional and consumers must tolerate new ones (§13). Known fields: `backend`, `model`, `is_task`, `task_gated`, `intent` (`choice`, `probabilities` map, `confidence`), `is_correction`, `destructive`, `bypass`, `severity`, `masses` (`confidence_low`, `atomicity_low`, `drift_high`, `pollution_high`). Surfaced in the popover's "Why this grade" disclosure (§9.3).
@@ -277,7 +279,7 @@ pollution_attention = 7
 celebrate_consecutive_n = 5
 loop_edits_in_window = 3    # N edits to same file in N consecutive turns
 loop_window_turns = 3
-context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy
+context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit per §5.4)
 
 [grader]
 model = "claude-haiku-4-5-20251001"
@@ -354,6 +356,18 @@ Two distinct triggers, both of which set `dominant_signal` to a sentinel value:
 - **Context pressure**: `tokens_used / tokens_limit > context_pressure_pct / 100`. `dominant_signal: "context_pressure"`.
 
 The plugin computes both and sets `dominant_signal` accordingly. The grader prompt does not need to know about these — they are mechanical, not semantic.
+
+**Token usage.** Hook payloads carry no usage either, so `tokens_used` is measured by the hooks from the transcript at `transcript_path`: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` of the last `type: "assistant"` record carrying `usage` whose model is not `<synthetic>` (`plugin/lib/transcript.sh transcript_window`, the same arithmetic as `grader/jev.mjs parseTranscript`). That count is what the resolver below floors against. No transcript, or none with assistant usage yet, leaves the grader's `tokens_used` standing and the floor is re-applied against it.
+
+**Context window resolution.** Hook payloads carry no model or window, so `tokens_limit` is resolved per grade by `plugin/lib/context_window.sh` (mirrored in `grader/jev.mjs` and `grader/jev_shadow.py`; the prefix table is `plugin/lib/context_windows.json`, read by all three). First hit wins and is recorded as `limit_source` (§4.1):
+
+1. `override` — `CONTEXTBUDDY_CONTEXT_WINDOW` from the environment or a `.env` found by `lib/dotenv.sh`. Accepts `300000` / `300k` / `1m`. Deliberately not a `config.toml` key: the Swift parser drops the whole file on an unknown key (§4.8).
+2. `autocompact` — `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else `autoCompactWindow` in `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` (what `/autocompact` writes), same spellings. The effective ceiling is the compact trigger, not the raw window.
+3. `model` — `message.model` of the last `type: "assistant"` record in `hook.transcript_path` whose model is not `<synthetic>`, mapped by prefix: 1M for `claude-fable-*`, `claude-mythos-*`, `claude-sonnet-5*`, `claude-opus-5*`, `claude-opus-4-8*`, `claude-opus-4-7*`; 200K for `claude-haiku-*`, `claude-sonnet-4-6*`, `claude-opus-4-6*`, `claude-*-4-5*` and anything else (conservative). `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` forces 200K on the 1M rows. `[1m]` variants and gateway aliases are out of scope and rely on step 5.
+4. `default` — no transcript, no model: 200000.
+5. `observed` — evidence floor, applied after 1-4 against the measured `tokens_used`: a limit below `tokens_used` is raised to the next tier (200K → 1M; past the last tier, to `tokens_used` itself). Never lower the limit below observed usage. This is why a 697327-token transcript on a model the table does not know grades against 1M, not 200K: the limit was unknown, not the context full.
+
+The hooks resolve once per grade, print the pair on the `## tokens` line the LLM backends copy, embed it in the typesafe job, and stamp `tokens_used` / `tokens_limit` / `model` / `limit_source` onto the grade in one write before the context-pressure comparison, so the four fields can never disagree, `tokens_used ≤ tokens_limit` holds for every grade written, and all four backends agree. Budget: `tail` plus `jq` over the transcript and `settings.json`; no API calls.
 
 ### 5.5 Celebrate consecutive counting
 
@@ -435,7 +449,7 @@ Pollution is graded only on `post` (Stop) phase. On `pre` (UserPromptSubmit) pha
 You will write the grader system prompt as a complete, locked artifact at `plugin/grader/system_prompt.md`. It must:
 
 1. **Embed §6 verbatim** as the rubric definitions. Do not paraphrase, do not condense, do not "improve" the rubric prose. The exact words in §6 are the IP.
-2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), last 3 turns verbatim, prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
+2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), the last N typed prompts verbatim (N = `[grader] sliding_window_turns`, default 3, read from the transcript at `transcript_path` as §10.1 describes — typed prompts only, no assistant replies and no tool calls), prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
 3. **Specify the output schema**: must produce JSON conforming to §4.1 exactly. Include a worked output example (use Worked Example 1 from §8 as the canonical example). Strict JSON only — no preamble, no chain-of-thought, no markdown fences around the output.
 4. **Instruct on rationale tone**: concrete, references turns/files, under ~120 chars, action-mappable where possible.
 5. **Instruct on `dominant_signal`**: set to the dimension whose threshold cross drove a state change, OR `null` if no threshold crossed. Do not set to `"loop"` or `"context_pressure"` — those are set mechanically by the plugin, not the grader.
@@ -598,7 +612,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. The file has been edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
@@ -620,7 +634,7 @@ Note: no individual *score* crossed an attention threshold. Dizzy is triggered b
 🌀 dizzy
 ─────────────
 Confidence  ▓▓▓▓▓▓▓╎░░░  7/10
-Atomicity   ▓▓▓▓▓▓╎░░░░  6/10
+Atomicity   ▓▓▓▓▓▓▓▓▓░░  9/10
 Drift       ▓▓░░░░░╎░░░  2/10
 Pollution   ▓▓▓▓▓░░╎░░░  5/10
 
@@ -725,7 +739,8 @@ gives the full 12 chars; each action button says what it writes and its
 keyboard shortcut. The same strings back the VoiceOver labels.
 
 **Token economics row** is always rendered when `tokens_limit > 0`, formatted
-`⚡ 142k / 200k (71%)`, de-emphasized below `[ui].token_row_pct` and orange
+`⚡ 142k / 200k (71%)` (a 1M window prints as `1M`: `⚡ 176k / 1M (17%)`,
+`TokenFormat.short`), de-emphasized below `[ui].token_row_pct` and orange
 above it. It was previously hidden entirely below the threshold; "how close am
 I to a compact?" is a question the user asks deliberately, and a row that
 vanishes cannot answer it.
@@ -776,7 +791,7 @@ When popover is focused:
 - Ensures the session directory exists.
 - Records `meta.json` (§4.9) with that same `$PWD`, atomically. Failure is logged and skipped like any other hook error (§13) — the buddy falls back to the hash.
 - Determines the current turn number: advances `turns/.counter` under the write lock (seeded from the max `turns/NNN-*.json`), so a skipped grade still consumes a number.
-- Assembles grader input: session.md, latest prompt (from hook env), last 3 turns verbatim, prior summary from history.jsonl tail.
+- Assembles grader input: session.md, latest prompt (from hook input), last 3 typed prompts verbatim and `tokens_used` from the JSONL transcript at the hook input's `transcript_path` (the payload itself carries no turns or usage), prior summary from history.jsonl tail.
 - Calls Anthropic Messages API with Haiku model, grader system prompt, assembled input.
 - Parses response JSON. Validates conforms to schema §4.1. On parse failure, log error and skip — do not crash the user's session.
 - Writes `turns/NNN-pre.json` atomically.
@@ -786,7 +801,7 @@ When popover is focused:
 - If state would transition to `attention` or `dizzy`, appends a section to `suggestions.md`.
 
 **`hooks/stop.sh`**: identical pipeline but with phase=`post` (including the `meta.json` write, since a Stop can be the first hook to create the session directory). Additionally:
-- Reads the agent's tool calls from the hook input to extract the list of files edited.
+- Reads this turn's `Edit`/`Write`/`MultiEdit` `tool_use` records — the assistant records after the last typed prompt in the transcript at `transcript_path` — to extract the list of files edited. The hook input carries no tool calls.
 - Maintains a rolling edit history (last 5 turns × edited files) in a small file under `sessions/<hash>/edits.jsonl`.
 - Computes loop detection per §5.4 and overrides `dominant_signal` to `"loop"` if triggered.
 - Writes `turns/NNN-post.json`, updates `last.json`, appends history.
@@ -798,6 +813,8 @@ When popover is focused:
 ```
 🟢 conf:8 atom:7 drift:2 pol:3 ⚡48k/200k
 ```
+
+The token pair abbreviates like the popover row: `k` for thousands, `M` for millions (`⚡176k/1M` on a 1M-window model).
 
 Color of the leading dot maps to current state (green for idle/celebrate, yellow for attention, orange for dizzy, gray for sleep, blue spinner for busy). Status line script must complete in <50ms; do not call APIs.
 
@@ -863,6 +880,8 @@ The buddy and the plugin must each fail gracefully when the other is absent or m
 - **Malformed `last.json`**: buddy logs to stderr, retains previous state, continues watching.
 - **Missing `session.md`**: plugin grader prompt notes its absence; scores produced are advisory but flagged with reduced confidence in rationale ("session.md not found — grading against prompt only").
 - **Anthropic API error (rate limit, timeout)**: plugin logs and skips that grade. No file is written. Buddy state remains as-of-previous-grade.
+- **`transcript_path` missing, unreadable, or not a regular file**: the hook grades with an empty turn window and a transcript `tokens_used` of 0 (the grader's own token fields stand), writes one `contextbuddy:` warning to stderr, exits 0, and still writes the grade.
+- **`jq` missing**: `transcript_window` degrades to the same empty window with a `contextbuddy:` warning and the hook continues; exit 0 in every case. On the default `anthropic` backend the grade is still written, unvalidated, because the §4.1 check and the mechanical `dominant_signal` overrides need jq. `ollama` and `openai_compatible` refuse up front in `grader/invoke.sh` and `typesafe` cannot build its job file, so those grades are logged and skipped.
 - **SQLite corruption**: buddy logs error and recreates state.db with empty tables. Feedback events are lost; state.db is best-effort, not durable contract.
 - **Project hash collision**: vanishingly unlikely with 12-char sha256 prefix. Not handled.
 - **`config.toml` malformed**: plugin and buddy fall back to compiled-in defaults (matching the values in §4.8). Log warning.
