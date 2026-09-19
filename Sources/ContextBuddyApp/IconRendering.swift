@@ -78,6 +78,11 @@ enum StatusItemIcon {
     struct Motion: Equatable {
         // The repeating effect running while the state is held; nil when none.
         var held: IconStyle.Animation? = nil
+        // Held effects started since the view was installed. `held` alone
+        // cannot show a restart: render() re-assigns it to the same value
+        // after a remove-and-re-add, so this count is what pins "a repeated
+        // snapshot leaves the running effect alone" (§9.2).
+        var heldStarts = 0
         // One-shots started since the view was installed. Advances once per
         // transition into a one-shot state; a snapshot that repeats the state
         // leaves it unchanged (§9.2).
@@ -164,9 +169,11 @@ final class StatusIconImageView: NSImageView {
         case .rotateRepeating:
             addSymbolEffect(.rotate, options: .repeating)
             motion.held = .rotateRepeating
+            motion.heldStarts += 1
         case .wiggleRepeating:
             addSymbolEffect(.wiggle, options: .repeating)
             motion.held = .wiggleRepeating
+            motion.heldStarts += 1
         case .scalePulseOnce, .bounceOnce:
             // §9.1 says "300ms scale pulse on transition" for attention;
             // .bounce is the nearest scale-flavored one-shot

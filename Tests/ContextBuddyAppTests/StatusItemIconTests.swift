@@ -215,7 +215,9 @@ final class StatusItemIconTests: XCTestCase {
 
     // busy rotates and dizzy wiggles for as long as the state lasts: started on
     // entry, left running by a repeated snapshot, removed on exit. Neither
-    // counts as a one-shot.
+    // counts as a one-shot. `heldStarts` is the assertion that matters for the
+    // repeated snapshot: `held` reads the same whether the effect was left
+    // alone or removed and re-added, and only the count tells them apart.
     func testHeldEffectsRunWhileTheStateLastsAndStopWhenItEnds() {
         let held: [(BuddyState, IconStyle.Animation)] = [(.busy, .rotateRepeating), (.dizzy, .wiggleRepeating)]
         for entry in held {
@@ -224,8 +226,11 @@ final class StatusItemIconTests: XCTestCase {
             StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
             StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
             XCTAssertEqual(motion(of: button).held, animation, state.rawValue)
+            XCTAssertEqual(motion(of: button).heldStarts, 1, "\(state.rawValue): entering starts it once")
             StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
             XCTAssertEqual(motion(of: button).held, animation, "\(state.rawValue): a repeated snapshot keeps it running")
+            XCTAssertEqual(motion(of: button).heldStarts, 1,
+                           "\(state.rawValue): a repeated snapshot must not remove and re-add the effect")
             StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
             XCTAssertNil(motion(of: button).held, "\(state.rawValue) -> idle stops it")
             XCTAssertEqual(motion(of: button).oneShotsStarted, 0, "\(state.rawValue) is held, not one-shot")
@@ -243,8 +248,9 @@ final class StatusItemIconTests: XCTestCase {
         XCTAssertNil(motion(of: button).lastOneShot)
     }
 
-    // `[ui].animations_enabled = false` keeps the glyph and tint and starts no
-    // effect, held or one-shot, through every transition.
+    // `animationsEnabled: false` keeps the glyph and tint and starts no effect,
+    // held or one-shot, through every transition. That is the `apply` argument,
+    // not the config key: wiring `[ui].animations_enabled` to it is #36.
     func testAnimationsDisabledStartsNoMotion() {
         let button = makeButton(appearance: .darkAqua)
         for state in BuddyState.allCases {
