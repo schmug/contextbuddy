@@ -73,7 +73,7 @@ The two halves communicate exclusively through the file system. The plugin owns 
 
 **Process model**: a single Swift process. Internally, `ContextBuddyCore` is an actor exposing `subscribe() -> AsyncStream<BuddyState>` and `recordFeedback(...)` methods. `ContextBuddyApp` is a thin SwiftUI client that subscribes and renders. This separation makes the watcher extractable into a CLI daemon later if hardware sinks are revisited.
 
-**Discovery and multi-project**: the buddy watches `~/.claude/inspector/sessions/` at the directory level via FSEvents. The plugin writes to `sessions/<project-hash>/`, where `<project-hash>` is `sha256(absolute_project_path)[:12]`. The buddy reflects the most-recently-updated session by default; the right-click menu lists recently-active sessions for explicit pinning.
+**Discovery and multi-project**: the buddy watches `~/.claude/inspector/sessions/` at the directory level via FSEvents. The plugin writes to `sessions/<project-hash>/`, where `<project-hash>` is `sha256(canonical_project_path)[:12]` — the absolute path with symlinks resolved (realpath(3)), so `/tmp/x` and `/private/tmp/x` are one project (issue #4). The buddy reflects the most-recently-updated session by default; the right-click menu lists recently-active sessions for explicit pinning.
 
 **Sandboxing**: do not sandbox in v1. Notarize-only distribution. `LSUIElement = true` (no Dock icon).
 
@@ -126,7 +126,7 @@ contextbuddy/
 │   │   ├── system_prompt.md            # the grader prompt (Opus authors wrapper)
 │   │   └── invoke.sh                   # POSTs to Anthropic API, writes JSON
 │   └── lib/
-│       ├── project_hash.sh             # sha256(absolute_path)[:12]
+│       ├── project_hash.sh             # sha256(realpath(absolute_path))[:12]
 │       ├── session_paths.sh            # resolves all paths from project hash
 │       └── transcript.sh               # sliding window assembly
 └── docs/
@@ -294,12 +294,13 @@ task_gate = 0.5             # is_task probability (0 to 1) below which the turn 
 harm_action = 0.7           # destructive/bypass probability (0 to 1) treated as actionable
 
 [ui]
-animations_enabled = true
+animations_enabled = true   # false: no icon motion. macOS Reduce Motion has the same effect; the two compose as AND (§9.6)
+token_row_pct = 70          # §9.3 ⚡ row is de-emphasized at or below this percent
 ```
 
 Unknown sections and keys are rejected, and a rejected file falls back to compiled-in defaults as a whole (§13). Adding a key means adding it to `Config.parse` first. `task_gate` and `harm_action` outside 0 to 1, and a `[grader.typesafe].endpoint` that is not `https://` and not a loopback host (`localhost`, `127.0.0.1`, `::1`), are rejected the same way; the hooks substitute the per-key default for the gates and `jev.mjs` refuses the endpoint with exit 2.
 
-The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required.
+The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required. The buddy also checks the file on its 30 s sleep tick, so an edit with no grade in flight lands within one tick.
 
 ### 4.9 `meta.json`
 
@@ -314,7 +315,7 @@ Project identity for the session directory. The project hash is one-way, so this
 
 **Field rules**:
 - `schema_version` — always `1` in v1.
-- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. When path canonicalization lands (issue #4), the canonical string is what gets recorded — there is no second normalization step here.
+- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. The hooks pass the canonical (symlink-resolved) path (issue #4), so that is what gets recorded — there is no second normalization step here.
 
 Deliberately *not* a field on `last.json`: project identity is session metadata rather than a graded score, `last.json` is version-gated as the grader's validated output schema (§4.1), and the project name must be correct from turn one rather than only after the first successful grade.
 
@@ -620,7 +621,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. The file has been edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
@@ -642,7 +643,7 @@ Note: no individual *score* crossed an attention threshold. Dizzy is triggered b
 🌀 dizzy
 ─────────────
 Confidence  ▓▓▓▓▓▓▓╎░░░  7/10
-Atomicity   ▓▓▓▓▓▓╎░░░░  6/10
+Atomicity   ▓▓▓▓▓▓▓▓▓░░  9/10
 Drift       ▓▓░░░░░╎░░░  2/10
 Pollution   ▓▓▓▓▓░░╎░░░  5/10
 
@@ -697,6 +698,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 - **Routine transitions** (idle ↔ busy) are silent and instantaneous. No motion.
 - **Attention/celebrate/dizzy/heart** transitions are animated. Animation is the attention signal.
 - All animations under 800ms total wall-clock unless the state itself is held (dizzy wiggles continuously while in state; celebrate plays once and ends).
+- The status item is an AppKit `NSStatusItem`, so the effects in §9.1 run as the same SF Symbol effects through `NSImageView.addSymbolEffect` (`.bounce`, `.wiggle`, `.pulse`, `.rotate`) on an image view hosted in the item's button. A one-shot plays once per transition into its state; a snapshot that repeats the state does not replay it.
 
 ### 9.3 Popover
 
@@ -712,7 +714,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
   - "Why this grade" disclosure, collapsed by default (see below)
   - Action row: `[Ack]  [Mute "<signal>"]  [Open inspector]` (Mute button hidden in celebrate/heart states)
   - Horizontal rule
-  - Project footer row, pinned to the bottom: `📁 <project name>` — the last path component of `project_path` from `meta.json` (§4.9), naming the project the scores belong to. Truncated in the middle, never wrapped. The full absolute path is the row's tooltip only, never rendered inline (it leaks `/Users/<username>/…` into a screenshot-able surface and does not fit 320pt). Falls back to the project-hash prefix when `meta.json` is absent. Distinct from `plugin/statusline.sh`, which is Claude Code's status line (§10.2) and needs no project label.
+  - Project footer row, pinned to the bottom: `📁 <project name>` — the name of the repository `project_path` from `meta.json` (§4.9) sits in, naming the project the scores belong to. The buddy walks up from `project_path` to the nearest ancestor holding a `.git` entry: a `.git` directory names that ancestor; a linked worktree's `.git` file (`gitdir: <main>/.git/worktrees/<name>`) names the main checkout, so a session in `.claude/worktrees/objective-cerf-9a0580` shows `contextbuddy`; any other `.git` file names the directory holding it. With no repository above the path, the name is the last path component. Resolution reads the `.git` entry directly (the buddy never shells out to `git`) and is cached per session hash, never recomputed per snapshot. Truncated in the middle, never wrapped. The recorded `project_path` — not the resolved repository root — is the row's tooltip only, never rendered inline (it leaks `/Users/<username>/…` into a screenshot-able surface and does not fit 320pt). Falls back to the project-hash prefix when `meta.json` is absent. Distinct from `plugin/statusline.sh`, which is Claude Code's status line (§10.2) and needs no project label.
 
 **Score meters.** The four dimensions render as one labelled row each, in §6
 rubric order, replacing the former one-line `conf:N atom:N drift:N pol:N` row.
@@ -763,7 +765,7 @@ backend packs the same digest into it and rendering both repeats every number.
 
 - "Ack current state" (disabled when in `idle`/`sleep`/`busy`)
 - "Mute current signal — this session"
-- "Recent sessions ▶" (submenu listing last 5 project hashes by name, allowing pin-to)
+- "Recent sessions ▶" (submenu listing the last 5 sessions by project name, allowing pin-to). Each item is titled with the project name resolved from the session's `meta.json` (§4.9), the same name as the §9.3 footer row; a session dir with no `meta.json` shows the hash prefix (`abcdef…`), never a blank row. Two visible sessions that resolve to the same name each carry their hash prefix as a suffix (`api (abcdef)`) so the rows stay distinguishable. The item's pin target and its checkmark are keyed on the full hash, never the title.
 - "Open inspector folder"
 - separator
 - "Preferences (edit config.toml)"
@@ -785,6 +787,7 @@ When popover is focused:
 - No Dock icon (`LSUIElement = true`).
 - No window other than the popover.
 - No automatic quit or sleep behavior beyond OS defaults.
+- No motion the user has turned off. `[ui].animations_enabled = false` and the macOS Reduce Motion setting (System Settings > Accessibility > Display) each suppress every §9.1 effect, held and one-shot; the glyph and tint still change. They compose as AND — neither overrides the other — and both take effect without a restart.
 
 ---
 

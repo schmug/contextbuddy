@@ -25,13 +25,17 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
-PROJECT_HASH="$(project_hash "$PWD")"
+# Canonical (symlink-resolved) project path, so /tmp/x and /private/tmp/x land in
+# one session dir whichever form Claude Code hands this hook (issue #4).
+PROJECT_PATH="$(canonical_project_path "$PWD")"
+PROJECT_HASH="$(project_hash "$PROJECT_PATH")"
 ensure_session_dir "$PROJECT_HASH"
 
 # Record the project path for the buddy's popover project footer row (issue #38).
-# Deliberately the same "$PWD" that was just hashed, so the recorded path and the
-# session dir name can never name different projects. Non-fatal per §13.
-write_session_meta "$PROJECT_HASH" "$PWD" 2>/dev/null \
+# Deliberately the same canonical string that was just hashed (SPEC.md §4.9), so
+# the recorded path and the session dir name can never name different projects.
+# Non-fatal per §13.
+write_session_meta "$PROJECT_HASH" "$PROJECT_PATH" 2>/dev/null \
   || log_err "could not write meta.json; popover falls back to the project hash"
 
 HOOK_PAYLOAD="$(cat || true)"

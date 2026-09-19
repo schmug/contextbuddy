@@ -41,7 +41,9 @@ claude plugin marketplace add /path/to/contextbuddy   # or: schmug/contextbuddy
 claude plugin install contextbuddy@contextbuddy
 ```
 
-A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way.
+A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way. The installed copy is cached by the version in `plugin/.claude-plugin/plugin.json`, so after new commits reinstall it (`claude plugin uninstall contextbuddy@contextbuddy && claude plugin install contextbuddy@contextbuddy`); `claude plugin update` reports up to date and changes nothing.
+
+Working on the plugin or the app? [CLAUDE.md](CLAUDE.md) holds the repo's working agreements for agents, including the live hook run every plugin PR must show.
 
 To verify the plugin manifest:
 
@@ -215,7 +217,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. Three consecutive edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
@@ -267,11 +269,11 @@ task_gate = 0.5             # is_task probability (0 to 1) below which the turn 
 harm_action = 0.7           # destructive/bypass probability (0 to 1) treated as actionable
 
 [ui]
-animations_enabled = true
-token_row_pct = 70          # show ⚡ row when usage > this percent
+animations_enabled = true   # false stops all icon motion; macOS Reduce Motion stops it too
+token_row_pct = 70          # ⚡ row turns orange when usage > this percent
 ```
 
-Both the buddy and the plugin read this on each grade event. Hot-reload is automatic.
+Both the buddy and the plugin read this on each grade event. Hot-reload is automatic; the buddy also re-reads the file on its 30 s sleep tick, so a `[ui]` edit lands within half a minute even with no grade in flight.
 
 ### Context window
 
@@ -403,7 +405,7 @@ Different backends produce different score distributions; don't mix-and-match wi
 ~/.claude/inspector/
 ├── config.toml
 └── sessions/
-    └── <project-hash>/         # sha256(absolute_project_path)[:12]
+    └── <project-hash>/         # sha256(canonical_project_path)[:12]
         ├── session.md          # YAML frontmatter; you author this
         ├── last.json           # most recent grade
         ├── history.jsonl       # append-only grade log
@@ -418,6 +420,10 @@ Different backends produce different score distributions; don't mix-and-match wi
 ~/Library/Application Support/ContextBuddy/
 └── state.db                    # buddy's SQLite (transitions + feedback)
 ```
+
+`<project-hash>` is computed from the project path with symlinks resolved (`realpath`), so `/tmp/foo` and `/private/tmp/foo` share one session directory. Before this, the two forms hashed differently and a session could split across two directories mid-conversation.
+
+**Migration note:** sessions created under a symlinked path before this change (anything under `/tmp` or `/var`, a symlinked Homebrew prefix, a mounted dev volume) were hashed from the unresolved string, and the plugin and the app now read the canonical hash directory instead. Nothing is migrated automatically. To keep an old session, copy its files into the canonical directory (or rename the directory if the canonical one does not exist yet); `source plugin/lib/project_hash.sh && project_hash "$PWD"` prints the new name from inside the project. Leaving the old directory in place is harmless.
 
 ---
 
