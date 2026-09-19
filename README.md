@@ -391,7 +391,7 @@ Different backends produce different score distributions; don't mix-and-match wi
 ~/.claude/inspector/
 ├── config.toml
 └── sessions/
-    └── <project-hash>/         # sha256(absolute_project_path)[:12]
+    └── <project-hash>/         # sha256(canonical_project_path)[:12]
         ├── session.md          # YAML frontmatter; you author this
         ├── last.json           # most recent grade
         ├── history.jsonl       # append-only grade log
@@ -406,6 +406,10 @@ Different backends produce different score distributions; don't mix-and-match wi
 ~/Library/Application Support/ContextBuddy/
 └── state.db                    # buddy's SQLite (transitions + feedback)
 ```
+
+`<project-hash>` is computed from the project path with symlinks resolved (`realpath`), so `/tmp/foo` and `/private/tmp/foo` share one session directory. Before this, the two forms hashed differently and a session could split across two directories mid-conversation.
+
+**Migration note:** sessions created under a symlinked path before this change (anything under `/tmp` or `/var`, a symlinked Homebrew prefix, a mounted dev volume) were hashed from the unresolved string, and the plugin and the app now read the canonical hash directory instead. Nothing is migrated automatically. To keep an old session, copy its files into the canonical directory (or rename the directory if the canonical one does not exist yet); `source plugin/lib/project_hash.sh && project_hash "$PWD"` prints the new name from inside the project. Leaving the old directory in place is harmless.
 
 ---
 

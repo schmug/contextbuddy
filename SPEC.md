@@ -73,7 +73,7 @@ The two halves communicate exclusively through the file system. The plugin owns 
 
 **Process model**: a single Swift process. Internally, `ContextBuddyCore` is an actor exposing `subscribe() -> AsyncStream<BuddyState>` and `recordFeedback(...)` methods. `ContextBuddyApp` is a thin SwiftUI client that subscribes and renders. This separation makes the watcher extractable into a CLI daemon later if hardware sinks are revisited.
 
-**Discovery and multi-project**: the buddy watches `~/.claude/inspector/sessions/` at the directory level via FSEvents. The plugin writes to `sessions/<project-hash>/`, where `<project-hash>` is `sha256(absolute_project_path)[:12]`. The buddy reflects the most-recently-updated session by default; the right-click menu lists recently-active sessions for explicit pinning.
+**Discovery and multi-project**: the buddy watches `~/.claude/inspector/sessions/` at the directory level via FSEvents. The plugin writes to `sessions/<project-hash>/`, where `<project-hash>` is `sha256(canonical_project_path)[:12]` — the absolute path with symlinks resolved (realpath(3)), so `/tmp/x` and `/private/tmp/x` are one project (issue #4). The buddy reflects the most-recently-updated session by default; the right-click menu lists recently-active sessions for explicit pinning.
 
 **Sandboxing**: do not sandbox in v1. Notarize-only distribution. `LSUIElement = true` (no Dock icon).
 
@@ -126,7 +126,7 @@ contextbuddy/
 │   │   ├── system_prompt.md            # the grader prompt (Opus authors wrapper)
 │   │   └── invoke.sh                   # POSTs to Anthropic API, writes JSON
 │   └── lib/
-│       ├── project_hash.sh             # sha256(absolute_path)[:12]
+│       ├── project_hash.sh             # sha256(realpath(absolute_path))[:12]
 │       ├── session_paths.sh            # resolves all paths from project hash
 │       └── transcript.sh               # sliding window assembly
 └── docs/
@@ -305,7 +305,7 @@ Project identity for the session directory. The project hash is one-way, so this
 
 **Field rules**:
 - `schema_version` — always `1` in v1.
-- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. When path canonicalization lands (issue #4), the canonical string is what gets recorded — there is no second normalization step here.
+- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. The hooks pass the canonical (symlink-resolved) path (issue #4), so that is what gets recorded — there is no second normalization step here.
 
 Deliberately *not* a field on `last.json`: project identity is session metadata rather than a graded score, `last.json` is version-gated as the grader's validated output schema (§4.1), and the project name must be correct from turn one rather than only after the first successful grade.
 
