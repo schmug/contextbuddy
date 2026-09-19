@@ -96,7 +96,7 @@ The buddy aggregates these into seven states. Default thresholds (in `~/.claude/
 | `busy` | UserPromptSubmit fired without a matching Stop yet |
 | `attention` | `confidence<4` or `atomicity<4` or `drift>6` or `pollution>7` |
 | `celebrate` | 5 consecutive grades all-green |
-| `dizzy` | 3 edits to the same file in 3 consecutive turns OR `tokens_used/tokens_limit > 85%` |
+| `dizzy` | 3 edits to the same file in 3 consecutive turns OR `tokens_used/tokens_limit > 85%` (`tokens_limit` is the session model's window, see [Context window](#context-window)) |
 | `heart` | You acked a suggestion |
 
 ---
@@ -215,7 +215,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. Three consecutive edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
@@ -245,7 +245,7 @@ pollution_attention = 7
 celebrate_consecutive_n = 5
 loop_edits_in_window = 3    # N edits to same file in N consecutive turns
 loop_window_turns = 3
-context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy
+context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit: see Context window)
 
 [grader]
 backend = "anthropic"       # "anthropic" | "ollama" | "openai_compatible"
@@ -266,6 +266,18 @@ token_row_pct = 70          # show ⚡ row when usage > this percent
 ```
 
 Both the buddy and the plugin read this on each grade event. Hot-reload is automatic.
+
+### Context window
+
+`tokens_limit` is resolved per grade from the session's actual model, not hardcoded. Hook payloads carry no model, so the plugin reads `message.model` from the last assistant record of the session transcript (`<synthetic>` placeholder records are skipped). Resolution order, first hit wins; the grade records the winner in `limit_source`:
+
+1. `override` — `CONTEXTBUDDY_CONTEXT_WINDOW` in the environment or a `.env` in the project (same lookup as `CONTEXTBUDDY_CLAUDE_CONFIG_DIR`). Accepts `300000`, `300k`, `1m`. Not a `config.toml` key: the app's parser drops the whole file on an unknown key.
+2. `autocompact` — Claude Code's auto-compact window: `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else `autoCompactWindow` in `~/.claude/settings.json` (respects `CLAUDE_CONFIG_DIR`), as written by `/autocompact 500k`. Pressure is measured against the ceiling you will actually hit.
+3. `model` — prefix table in `plugin/lib/context_windows.json`: 1M for `claude-fable-*`, `claude-mythos-*`, `claude-sonnet-5*`, `claude-opus-5*`, `claude-opus-4-8*`, `claude-opus-4-7*`; 200K for Haiku, Sonnet 4.6 / 4.5, Opus 4.6 / 4.5 and any unknown id. `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` caps the 1M rows at 200K. `[1m]` variants of Sonnet 4.6 / Opus 4.6 are not detected; they resolve to 200K and rely on step 5.
+4. `default` — no transcript or no model: 200K.
+5. `observed` — evidence floor: if `tokens_used` exceeds the limit from steps 1-4, the assumption is provably wrong and the limit is raised to the next tier (200K → 1M). No grade is ever written with `tokens_used > tokens_limit`.
+
+Every grade also carries `model` (the session's Claude model id, or `null`). The status line and popover print a 1M window as `1M` (`⚡176k/1M`). The same resolver runs in the hooks (all four backends get the same limit), in the typesafe grader and in the Jev shadow grader.
 
 ---
 
@@ -423,7 +435,7 @@ By design (§9.6 / §15):
 
 ```bash
 swift test                    # core (Schemas, StateMachine, Storage, Watcher, …)
-bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hook job builder) + node grader tests
+bash scripts/test_plugin.sh   # plugin shell layer (grader dispatcher, hook job builder, context window resolver, hooks) + node grader tests
 node --test Tests/plugin/test_jev_grader.mjs   # typesafe grader alone (no network; fetch is injected)
 ```
 
