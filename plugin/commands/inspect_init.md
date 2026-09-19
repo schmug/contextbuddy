@@ -2,13 +2,14 @@
 description: Bootstrap a ContextBuddy session.md anchor for the current project.
 ---
 
-You are bootstrapping a ContextBuddy `session.md` anchor file at `~/.claude/inspector/sessions/<project-hash>/session.md`. Project hash is `sha256(absolute_path($PWD))[:12]`.
+You are bootstrapping a ContextBuddy `session.md` anchor file at `~/.claude/inspector/sessions/<project-hash>/session.md`. Project hash is `sha256(realpath($PWD))[:12]` — symlinks resolved, so `/tmp/x` and `/private/tmp/x` are one project.
 
 ## Steps
 
 1. Compute the project hash and target path. Run:
    ```bash
-   PROJECT_HASH=$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-12)
+   # symlinks resolved first, same as plugin/lib/project_hash.sh (issue #4)
+   PROJECT_HASH=$(printf '%s' "$(cd -P -- "$PWD" 2>/dev/null && pwd -P || printf '%s' "$PWD")" | shasum -a 256 | cut -c1-12)
    SESSION_DIR="$HOME/.claude/inspector/sessions/$PROJECT_HASH"
    mkdir -p "$SESSION_DIR"
    TARGET="$SESSION_DIR/session.md"

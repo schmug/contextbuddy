@@ -11,8 +11,21 @@ final class MenubarController: NSObject, NSMenuDelegate {
     private var snapshot = BuddyCore.Snapshot(
         state: .sleep, projectHash: nil, lastGrade: nil, pinnedHash: nil
     )
-    private var animationsEnabled = true
-    private var tokenRowPct = 70
+    // `[ui]` (animations_enabled, token_row_pct) is read from `snapshot.ui`,
+    // not held here: BuddyCore hot-reloads config.toml and every snapshot
+    // carries the live value (#36).
+    //
+    // The system Reduce Motion switch (System Settings > Accessibility >
+    // Display). StatusItemIcon.animationsEnabled(ui:reduceMotion:) ANDs it
+    // with the config key. Observed, not read once: the user can flip it while
+    // the app runs, and NSWorkspace posts
+    // accessibilityDisplayOptionsDidChangeNotification when they do.
+    private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    // nonisolated(unsafe): deinit is nonisolated and the token type is not
+    // Sendable, so Swift 6 would not let deinit read a main-actor property of
+    // it. Written once in init on the main actor and read once in deinit when
+    // no other reference to self exists, so nothing can race the access.
+    nonisolated(unsafe) private var reduceMotionObserver: NSObjectProtocol?
     private var subscriptionTask: Task<Void, Never>?
 
     // Async factory replaces the previous semaphore-blocking init. AppDelegate
@@ -30,18 +43,26 @@ final class MenubarController: NSObject, NSMenuDelegate {
     private init(core: BuddyCore, inspectorRoot: URL) {
         self.core = core
         self.inspectorRoot = inspectorRoot
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Fixed width: the button draws no image of its own (the glyph is the
+        // image view StatusItemIcon.apply hosts in it), so variableLength
+        // would collapse the item. See StatusItemIcon.length.
+        self.statusItem = NSStatusBar.system.statusItem(withLength: StatusItemIcon.length)
         self.popover = NSPopover()
 
         super.init()
 
         configureStatusItem()
+        observeReduceMotion()
         configurePopover()
         startObserving()
     }
 
     deinit {
         subscriptionTask?.cancel()
+        // Block observers are not auto-removed the way selector ones are.
+        if let reduceMotionObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(reduceMotionObserver)
+        }
     }
 
     private func configureStatusItem() {
@@ -84,7 +105,35 @@ final class MenubarController: NSObject, NSMenuDelegate {
 
     private func renderIcon() {
         guard let button = statusItem.button else { return }
-        StatusItemIcon.apply(state: snapshot.state, animationsEnabled: animationsEnabled, to: button)
+        StatusItemIcon.apply(
+            state: snapshot.state,
+            animationsEnabled: StatusItemIcon.animationsEnabled(ui: snapshot.ui, reduceMotion: reduceMotion),
+            to: button
+        )
+    }
+
+    private func observeReduceMotion() {
+        reduceMotionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // `queue: .main` delivers on the main actor; the @Sendable block
+            // cannot state that itself.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reduceMotionDidChange()
+            }
+        }
+    }
+
+    // The notification also fires for contrast and transparency changes, so
+    // re-read the flag and only re-render when it moved.
+    private func reduceMotionDidChange() {
+        let next = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard next != reduceMotion else { return }
+        reduceMotion = next
+        renderIcon()
     }
 
     private func updatePopover() {
@@ -94,7 +143,7 @@ final class MenubarController: NSObject, NSMenuDelegate {
     private func makePopoverView() -> some View {
         PopoverView(
             snapshot: snapshot,
-            tokenRowPct: tokenRowPct,
+            tokenRowPct: snapshot.ui.tokenRowPct,
             onAck: { [weak self] in self?.handleAck() },
             onMute: { [weak self] in self?.handleMute() },
             onOpenInspector: { [weak self] in self?.openInspectorFolder() }
@@ -185,22 +234,57 @@ final class MenubarController: NSObject, NSMenuDelegate {
             empty.isEnabled = false
             submenu.addItem(empty)
         } else {
-            for session in sessions {
-                let item = NSMenuItem(
-                    title: session.projectHash,
-                    action: #selector(menuPinSession(_:)),
-                    keyEquivalent: ""
-                )
+            for item in Self.recentSessionItems(for: sessions, pinnedHash: snapshot.pinnedHash) {
                 item.target = self
-                item.representedObject = session.projectHash
-                if snapshot.pinnedHash == session.projectHash {
-                    item.state = .on
-                }
+                item.action = #selector(menuPinSession(_:))
                 submenu.addItem(item)
             }
         }
         parent.submenu = submenu
         return parent
+    }
+
+    // One submenu item per session, in the order given. Static and free of
+    // controller state so the titling rule is testable without a BuddyCore or
+    // an NSStatusItem (RecentSessionsMenuTests); the caller wires target and
+    // action. representedObject carries the hash because menuPinSession(_:)
+    // and BuddyCore.pinSession key on it, and the checkmark is the same
+    // comparison against Snapshot.pinnedHash.
+    static func recentSessionItems(for sessions: [SessionRef], pinnedHash: String?) -> [NSMenuItem] {
+        let titles = recentSessionTitles(for: sessions)
+        return zip(sessions, titles).map { (session: SessionRef, title: String) -> NSMenuItem in
+            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+            item.representedObject = session.projectHash
+            if pinnedHash == session.projectHash {
+                item.state = .on
+            }
+            return item
+        }
+    }
+
+    // Titles for the Recent sessions submenu (§9.4 "by name"), one per session,
+    // in order. The name comes from SessionRef.projectName — the repository-root
+    // resolver the popover footer row uses — so the two surfaces agree. A
+    // session dir with no meta.json falls back to the hash prefix exactly as
+    // PopoverView.projectLabel does (the hash is one-way; nothing else is
+    // known), never a blank row. Two visible sessions that resolve to the same
+    // name (`~/work/api` and `~/side/api`) each get their hash prefix appended
+    // so the rows stay distinguishable. Five items at most, built on
+    // right-click, so the per-name filesystem walk is not cached here the way
+    // BuddyCore caches it for the snapshot.
+    static func recentSessionTitles(for sessions: [SessionRef]) -> [String] {
+        let names = sessions.map { (session: SessionRef) -> String? in
+            session.projectName.flatMap { (name: String) -> String? in name.isEmpty ? nil : name }
+        }
+        var occurrences: [String: Int] = [:]
+        for case let name? in names {
+            occurrences[name, default: 0] += 1
+        }
+        return zip(sessions, names).map { (session: SessionRef, name: String?) -> String in
+            let prefix = String(session.projectHash.prefix(6))
+            guard let name else { return prefix + "…" }
+            return occurrences[name, default: 0] > 1 ? "\(name) (\(prefix))" : name
+        }
     }
 
     private var canAck: Bool {

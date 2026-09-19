@@ -56,7 +56,7 @@ const cases = [
   {
     name: 'ex3 turn29 (loop / correction)',
     prompt: 'still failing. the expired-token test in tests/auth/jwt.test.ts is red again, fix it',
-    expect: { specificity: 7, atomicity: 6, drift: 2, is_correction: true },
+    expect: { specificity: 7, atomicity: 9, drift: 2, is_correction: true },
   },
   {
     name: 'destructive + bypass',
