@@ -11,8 +11,21 @@ final class MenubarController: NSObject, NSMenuDelegate {
     private var snapshot = BuddyCore.Snapshot(
         state: .sleep, projectHash: nil, lastGrade: nil, pinnedHash: nil
     )
-    private var animationsEnabled = true
-    private var tokenRowPct = 70
+    // `[ui]` (animations_enabled, token_row_pct) is read from `snapshot.ui`,
+    // not held here: BuddyCore hot-reloads config.toml and every snapshot
+    // carries the live value (#36).
+    //
+    // The system Reduce Motion switch (System Settings > Accessibility >
+    // Display). StatusItemIcon.animationsEnabled(ui:reduceMotion:) ANDs it
+    // with the config key. Observed, not read once: the user can flip it while
+    // the app runs, and NSWorkspace posts
+    // accessibilityDisplayOptionsDidChangeNotification when they do.
+    private var reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    // nonisolated(unsafe): deinit is nonisolated and the token type is not
+    // Sendable, so Swift 6 would not let deinit read a main-actor property of
+    // it. Written once in init on the main actor and read once in deinit when
+    // no other reference to self exists, so nothing can race the access.
+    nonisolated(unsafe) private var reduceMotionObserver: NSObjectProtocol?
     private var subscriptionTask: Task<Void, Never>?
 
     // Async factory replaces the previous semaphore-blocking init. AppDelegate
@@ -39,12 +52,17 @@ final class MenubarController: NSObject, NSMenuDelegate {
         super.init()
 
         configureStatusItem()
+        observeReduceMotion()
         configurePopover()
         startObserving()
     }
 
     deinit {
         subscriptionTask?.cancel()
+        // Block observers are not auto-removed the way selector ones are.
+        if let reduceMotionObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(reduceMotionObserver)
+        }
     }
 
     private func configureStatusItem() {
@@ -87,7 +105,35 @@ final class MenubarController: NSObject, NSMenuDelegate {
 
     private func renderIcon() {
         guard let button = statusItem.button else { return }
-        StatusItemIcon.apply(state: snapshot.state, animationsEnabled: animationsEnabled, to: button)
+        StatusItemIcon.apply(
+            state: snapshot.state,
+            animationsEnabled: StatusItemIcon.animationsEnabled(ui: snapshot.ui, reduceMotion: reduceMotion),
+            to: button
+        )
+    }
+
+    private func observeReduceMotion() {
+        reduceMotionObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // `queue: .main` delivers on the main actor; the @Sendable block
+            // cannot state that itself.
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.reduceMotionDidChange()
+            }
+        }
+    }
+
+    // The notification also fires for contrast and transparency changes, so
+    // re-read the flag and only re-render when it moved.
+    private func reduceMotionDidChange() {
+        let next = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        guard next != reduceMotion else { return }
+        reduceMotion = next
+        renderIcon()
     }
 
     private func updatePopover() {
@@ -97,7 +143,7 @@ final class MenubarController: NSObject, NSMenuDelegate {
     private func makePopoverView() -> some View {
         PopoverView(
             snapshot: snapshot,
-            tokenRowPct: tokenRowPct,
+            tokenRowPct: snapshot.ui.tokenRowPct,
             onAck: { [weak self] in self?.handleAck() },
             onMute: { [weak self] in self?.handleMute() },
             onOpenInspector: { [weak self] in self?.openInspectorFolder() }

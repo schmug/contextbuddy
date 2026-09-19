@@ -261,11 +261,11 @@ endpoint = "http://localhost:1234/v1"
 api_key_env = ""            # name of an env var holding a bearer token; "" = no auth
 
 [ui]
-animations_enabled = true
-token_row_pct = 70          # show ⚡ row when usage > this percent
+animations_enabled = true   # false stops all icon motion; macOS Reduce Motion stops it too
+token_row_pct = 70          # ⚡ row turns orange when usage > this percent
 ```
 
-Both the buddy and the plugin read this on each grade event. Hot-reload is automatic.
+Both the buddy and the plugin read this on each grade event. Hot-reload is automatic; the buddy also re-reads the file on its 30 s sleep tick, so a `[ui]` edit lands within half a minute even with no grade in flight.
 
 ---
 

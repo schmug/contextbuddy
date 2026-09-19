@@ -3,8 +3,10 @@ import ContextBuddyCore
 
 // Maps BuddyState to (SFSymbol name, tint, animation policy) per §9.1.
 // Animation policy is owned here so StatusIconImageView can mirror it without
-// re-deciding. Honors `[ui].animations_enabled = false` by suppressing all
-// motion (still emits the symbol + tint).
+// re-deciding. `animationsEnabled` is `[ui].animations_enabled` ANDed with the
+// system Reduce Motion switch — StatusItemIcon.animationsEnabled(ui:reduceMotion:)
+// composes them and MenubarController.renderIcon() passes the result — and
+// false suppresses all motion (still emits the symbol + tint). (#36)
 enum IconStyle {
     static func style(for state: BuddyState, animationsEnabled: Bool) -> Style {
         switch state {
@@ -88,6 +90,15 @@ enum StatusItemIcon {
         // leaves it unchanged (§9.2).
         var oneShotsStarted = 0
         var lastOneShot: IconStyle.Animation? = nil
+    }
+
+    // The value for apply's `animationsEnabled:`. Motion plays only when
+    // `[ui].animations_enabled` allows it AND the system is not reducing
+    // motion (System Settings > Accessibility > Display > Reduce motion);
+    // neither switch overrides the other (#36). Pure, so StatusItemIconTests
+    // pins the table without a controller.
+    static func animationsEnabled(ui: Config.UI, reduceMotion: Bool) -> Bool {
+        ui.animationsEnabled && !reduceMotion
     }
 
     @MainActor

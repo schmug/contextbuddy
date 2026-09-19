@@ -285,10 +285,11 @@ sliding_window_turns = 3    # last N turns verbatim
 inspect_model = "claude-sonnet-4-6"
 
 [ui]
-animations_enabled = true
+animations_enabled = true   # false: no icon motion. macOS Reduce Motion has the same effect; the two compose as AND (§9.6)
+token_row_pct = 70          # §9.3 ⚡ row is de-emphasized at or below this percent
 ```
 
-The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required.
+The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required. The buddy also checks the file on its 30 s sleep tick, so an edit with no grade in flight lands within one tick.
 
 ### 4.9 `meta.json`
 
@@ -762,6 +763,7 @@ When popover is focused:
 - No Dock icon (`LSUIElement = true`).
 - No window other than the popover.
 - No automatic quit or sleep behavior beyond OS defaults.
+- No motion the user has turned off. `[ui].animations_enabled = false` and the macOS Reduce Motion setting (System Settings > Accessibility > Display) each suppress every §9.1 effect, held and one-shot; the glyph and tint still change. They compose as AND — neither overrides the other — and both take effect without a restart.
 
 ---
 
