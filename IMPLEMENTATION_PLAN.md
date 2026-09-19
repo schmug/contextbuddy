@@ -88,7 +88,7 @@ This confirms §3 and proposes three additions (called out inline).
 - **`Schemas.swift`** — `Codable` value types: `Grade` (one per §4.1, used for `last.json`, history lines, and per-turn snapshots — they share a schema), `Score`, `Phase` (`pre`/`post`), `DominantSignal` enum (the four dimensions + `loop` + `context_pressure` + `null`), `FeedbackEvent` (§4.6), `SessionAnchor` (§4.4), `Config` (§4.8), `EditRecord` (for `edits.jsonl`, see §3 addition #1). Decoding ignores unknown fields (§4 rule). Phase-aware: `pollution` rationale prefix `"(carried from turn N)"` is data, not parsed specially.
 - **`Watcher.swift`** — Wraps `FSEventStreamCreate` watching `~/.claude/inspector/sessions/`. Emits `(projectHash, lastJsonURL)` events. Debounces ~50 ms to coalesce atomic-rename pairs (write-temp + rename triggers two events). Re-parses `last.json` on each event; ignores partial/malformed reads.
 - **`StateMachine.swift`** — Pure function `nextState(prev: BuddyState, grade: Grade, history: StateHistory, cfg: Config) -> Transition`. Implements §5 precedence and the celebrate consecutive-counter (lives in `StateHistory`). `heart` is set imperatively from `Core.recordFeedback(.ack, …)` and decays on a timer; the state machine here only handles grade-driven transitions.
-- **`SessionDiscovery.swift`** — Computes `sha256(absolute_path)[:12]`. Lists `sessions/*/last.json` by mtime for MRU. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`.
+- **`SessionDiscovery.swift`** — Computes `sha256(absolute_path)[:12]`. Lists `sessions/*/last.json` by mtime for MRU, falling back to the session directory's mtime for sessions that have no grade yet. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`.
 - **`Storage.swift`** — SQLite wrapper around `state.db` (§4.7). Two writers: `recordFeedback` and `recordTransition`. Auto-creates schema. On `SQLITE_CORRUPT` or open failure, deletes file and recreates (§13). No reads in v1 — but expose `enumerateFeedback`/`enumerateTransitions` for the test suite to verify writes.
 - **`Core.swift`** — `public actor BuddyCore`. Composes the above. API:
   - `subscribe() -> AsyncStream<BuddyState>`
@@ -190,7 +190,7 @@ Each row below is one test. State machine is pure → table-driven `XCTest` with
 
 - `projectHash("/abs/path")` is deterministic and 12 hex chars.
 - Two distinct paths produce different hashes (no collision in fixture set of 100 random paths).
-- MRU returns sessions ordered by `last.json` mtime.
+- MRU returns sessions ordered by `last.json` mtime; a session with no `last.json` yet orders by its directory mtime instead.
 - Pinned session overrides MRU.
 - Empty `~/.claude/inspector/sessions/` → empty MRU, no error.
 
