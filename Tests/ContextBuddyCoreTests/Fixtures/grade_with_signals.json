@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "phase": "post",
+  "turn": 7,
+  "timestamp": "2026-09-18T20:57:31Z",
+  "scores": {
+    "confidence": {
+      "value": 2,
+      "rationale": "(anchor: first prompt) A goal is stated but no acceptance criteria are given; \"done\" is undefined."
+    },
+    "atomicity": {
+      "value": 5,
+      "rationale": "Two distinct actions, or two distinct decisions, are bundled; each could be requested on its own."
+    },
+    "drift": {
+      "value": 0,
+      "rationale": "(anchor: first prompt) Tightly aligned with the anchor goal; no scope creep."
+    },
+    "pollution": {
+      "value": 1,
+      "rationale": "stale reads 0, re-reads 0, large results 1 (mechanical count)"
+    }
+  },
+  "tokens_used": 123664,
+  "tokens_limit": 200000,
+  "dominant_signal": "confidence",
+  "summary_update": "intent investigate (63%); correction 4%; destructive 1%; bypass 2%; severity 0.2/3; task 98%",
+  "signals": {
+    "backend": "typesafe",
+    "model": "jev-1.13.0",
+    "is_task": 0.98,
+    "task_gated": false,
+    "intent": {
+      "choice": "investigate",
+      "probabilities": {
+        "operate": 0.04,
+        "fix_bug": 0.16,
+        "review": 0.01,
+        "plan_or_evaluate": 0.1,
+        "investigate": 0.63,
+        "add_feature": 0.06,
+        "correct_agent": 0,
+        "refactor": 0,
+        "off_task": 0
+      },
+      "confidence": 0.58
+    },
+    "is_correction": 0.04,
+    "destructive": 0.01,
+    "bypass": 0.02,
+    "severity": 0.19,
+    "masses": {
+      "confidence_low": 0.8,
+      "atomicity_low": 0.07,
+      "drift_high": 0.01
+    }
+  }
+}

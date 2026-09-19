@@ -186,6 +186,8 @@ A single grade. Always reflects the most recent grade event (whether `pre` or `p
 - `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*.
 - `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), or sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), or `null` (no state-changing signal).
 - `summary_update` — the rolling ~200-token summary maintained by the grader. Reflects state after this turn.
+- `signals` — optional object, backend-specific. Emitted by the `typesafe` backend only; absent for `anthropic`, `ollama` and `openai_compatible`. Every field inside is optional and consumers must tolerate new ones (§13). Known fields: `backend`, `model`, `is_task`, `task_gated`, `intent` (`choice`, `probabilities` map, `confidence`), `is_correction`, `destructive`, `bypass`, `severity`, `masses` (`confidence_low`, `atomicity_low`, `drift_high`, `pollution_high`). Surfaced in the popover's "Why this grade" disclosure (§9.3).
+  - Note for consumers: the keys of `intent.probabilities` are data, not schema. Swift's `.convertFromSnakeCase` does not rewrite dictionary keys, so they arrive verbatim (`fix_bug`, not `fixBug`).
 
 ### 4.2 `history.jsonl`
 
@@ -504,13 +506,19 @@ created_at: 2026-04-29T09:14:00Z
 
 **Popover content (on click)**:
 ```
-🟡 attention
-─────────────
-conf:6  atom:3  drift:2  pol:4
+🟡 attention   turn 14 · pre              a1b2c3…
+──────────────────────────────────────────
+Confidence  ▓▓▓▓▓▓╎░░░░  6/10
+Atomicity   ▓▓▓╎░░░░░░░  3/10  ⚠
+Drift       ▓▓░░░░░╎░░░  2/10
+Pollution   ▓▓▓▓░░░╎░░░  4/10
+⚡ 48k / 200k (24%)
 
 Atomicity: prompt bundles bug fix +
 opportunistic refactor + test addition.
 Try splitting into three prompts.
+
+› Why this grade
 
 [Ack]  [Mute "atomicity"]  [Open inspector]
 ```
@@ -563,7 +571,10 @@ Turns 18-22 have all produced post-Stop grades with all four scores ≥7. Turn 2
 ```
 ✨ celebrate
 ─────────────
-conf:8  atom:9  drift:1  pol:3
+Confidence  ▓▓▓▓▓▓▓▓╎░░  8/10
+Atomicity   ▓▓▓▓▓▓▓▓▓░░  9/10
+Drift       ▓░░░░░╎░░░░  1/10
+Pollution   ▓▓▓░░░░╎░░░  3/10
 
 5 consecutive all-green grades.
 Sustained quality on the JWT refactor.
@@ -607,7 +618,10 @@ Note: no individual *score* crossed an attention threshold. Dizzy is triggered b
 ```
 🌀 dizzy
 ─────────────
-conf:7  atom:6  drift:2  pol:5
+Confidence  ▓▓▓▓▓▓▓╎░░░  7/10
+Atomicity   ▓▓▓▓▓▓╎░░░░  6/10
+Drift       ▓▓░░░░░╎░░░  2/10
+Pollution   ▓▓▓▓▓░░╎░░░  5/10
 
 Loop: 3 consecutive edits to
 src/auth/jwt.ts. Test still failing
@@ -667,16 +681,59 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 - Dismisses on outside click. Dismisses on Esc.
 - Width: ~320pt. Height: variable based on content, but never tall enough to feel like a window.
 - Content (top to bottom):
-  - State name + emoji (e.g., "🟡 attention")
+  - State name + emoji (e.g., "🟡 attention"), the turn/phase badge (`turn 7 · post`), and the project hash fragment
   - Horizontal rule
-  - One-line score row: `conf:N  atom:N  drift:N  pol:N` (monospaced)
-  - Empty line
+  - Score meters — one row per dimension (see below)
+  - Token economics row
   - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`)
-  - Empty line
+  - "Why this grade" disclosure, collapsed by default (see below)
   - Action row: `[Ack]  [Mute "<signal>"]  [Open inspector]` (Mute button hidden in celebrate/heart states)
   - Horizontal rule
   - Project footer row, pinned to the bottom: `📁 <project name>` — the last path component of `project_path` from `meta.json` (§4.9), naming the project the scores belong to. Truncated in the middle, never wrapped. The full absolute path is the row's tooltip only, never rendered inline (it leaks `/Users/<username>/…` into a screenshot-able surface and does not fit 320pt). Falls back to the project-hash prefix when `meta.json` is absent. Distinct from `plugin/statusline.sh`, which is Claude Code's status line (§10.2) and needs no project label.
-- Token economics row appears *only* when `tokens_used / tokens_limit > 0.70`. Format: `⚡ 142k / 200k (71%)`. Placed between scores and rationale.
+
+**Score meters.** The four dimensions render as one labelled row each, in §6
+rubric order, replacing the former one-line `conf:N atom:N drift:N pol:N` row.
+That format could not express the property a reader most needs: confidence and
+atomicity are higher-is-better while drift and pollution are higher-is-worse
+(§6), so `conf:2 atom:5 drift:0 pol:1` renders the alarm (`conf:2`) and the
+best possible score (`drift:0`) identically.
+
+Each row is: full-word dimension name, a bar drawing the raw score with a tick
+at that dimension's own attention threshold, the value as `N/10`, and a marker
+when the dimension is the grade's `dominant_signal`.
+
+Colour encodes distance from the threshold, never raw magnitude:
+
+| Condition | Colour |
+|---|---|
+| Past the §5.2 attention threshold | orange (the `attention` icon tint, §9.1) |
+| Exactly at the threshold | yellow |
+| Otherwise | secondary/neutral |
+
+So orange means "this one is the problem" on all four dimensions regardless of
+which direction is bad, and the user never has to know the polarity to read the
+row. The bar draws the raw value rather than "goodness" — an inverted bar for
+drift and pollution would visibly disagree with the number beside it.
+
+**Tooltips.** Every element carries a `.help()` tooltip: each meter gives its
+rubric question, polarity, threshold and that dimension's full grader rationale
+(three of the four rationales are otherwise never shown); the state name
+explains what will clear it; the token row gives exact token counts; the hash
+gives the full 12 chars; each action button says what it writes and its
+keyboard shortcut. The same strings back the VoiceOver labels.
+
+**Token economics row** is always rendered when `tokens_limit > 0`, formatted
+`⚡ 142k / 200k (71%)`, de-emphasized below `[ui].token_row_pct` and orange
+above it. It was previously hidden entirely below the threshold; "how close am
+I to a compact?" is a question the user asks deliberately, and a row that
+vanishes cannot answer it.
+
+**"Why this grade" disclosure** is collapsed by default and holds the
+backend's `signals` block when present (§4.1): the top intents with their
+probabilities, the harm signals (`correction`, `destructive`, `bypass`,
+`severity`) in two columns, and the grader backend/model. `summary_update` is
+shown here only for backends that emit no `signals`, because the typesafe
+backend packs the same digest into it and rendering both repeats every number.
 
 ### 9.4 Right-click menu
 
