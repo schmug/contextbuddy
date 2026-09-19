@@ -41,13 +41,42 @@ final class SessionDiscoveryTests: XCTestCase {
         }
     }
 
-    func testProjectHashDifferentForCanonicalEdgeCases() {
-        // Trailing slash should produce a different hash. Plugin hashes
-        // exactly $PWD; consistency between hooks and tests means we must
-        // not normalize.
+    func testProjectHashHashesUnresolvablePathVerbatim() {
+        // Neither path exists, so realpath(3) cannot resolve it and the string
+        // is hashed verbatim: no normalization, the trailing slash still
+        // distinguishes. The plugin's `cd -P && pwd -P` falls back the same
+        // way, which is what keeps both sides agreeing on unresolvable input.
         XCTAssertNotEqual(
             SessionDiscovery.projectHash(for: "/x"),
             SessionDiscovery.projectHash(for: "/x/")
+        )
+    }
+
+    // MARK: - Canonical hashing (issue #4)
+
+    func testProjectHashResolvesSymlinksBeforeHashing() throws {
+        // /tmp is a symlink to /private/tmp on every macOS, and Claude Code's
+        // hooks see the project cwd in either form depending on entry point.
+        // Both must hash to sha256("/private/tmp")[:12]. The plugin's test
+        // (Tests/plugin/test_project_hash_canonical.sh) pins the same
+        // constant, so the two implementations cannot drift apart without
+        // failing one of the two tests. Change both or neither.
+        let expected = "11fe14a563f7"
+        XCTAssertEqual(SessionDiscovery.projectHash(for: "/private/tmp"), expected)
+        XCTAssertEqual(SessionDiscovery.projectHash(for: "/tmp"), expected)
+
+        // A user-made symlink resolves too (Homebrew prefixes, dev-volume mounts).
+        let real = root.appendingPathComponent("real")
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createDirectory(at: real, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        XCTAssertEqual(
+            SessionDiscovery.projectHash(for: link.path),
+            SessionDiscovery.projectHash(for: real.path)
+        )
+        XCTAssertEqual(
+            SessionDiscovery.canonicalProjectPath(link.path),
+            SessionDiscovery.canonicalProjectPath(real.path)
         )
     }
 
