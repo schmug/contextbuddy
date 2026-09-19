@@ -1,0 +1,38 @@
+name: Feature request
+description: Suggest a capability or a change in behaviour
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that ContextBuddy makes hard today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you have in mind
+      description: >
+        A sketch is fine. If it changes what a grade means or what gets
+        written to disk, say so — those are the parts SPEC.md pins down.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: half
+    attributes:
+      label: Which half would change
+      options:
+        - Menubar app (Swift)
+        - Plugin hooks / grader
+        - Both, or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+      description: Including "I could do this outside ContextBuddy by …".

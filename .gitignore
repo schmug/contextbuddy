@@ -20,3 +20,7 @@ DerivedData/
 
 # Python
 __pycache__/
+
+# Claude Code agent scratch (worktrees can reach several GB)
+.claude/worktrees/
+.claude/plans/

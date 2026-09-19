@@ -1,0 +1,93 @@
+# Build, sign, notarize and publish a DMG for a tagged release.
+#
+# Wraps scripts/release.sh, which does the actual work (see SPEC.md §12).
+# Triggered by pushing a tag like `v0.3.0`, or manually from the Actions tab.
+#
+# Required repository secrets — the job fails fast with a named error if any
+# are missing, so an unsigned tag push does not produce a half-finished draft:
+#
+#   DEVELOPER_ID        "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID            Apple ID used for notarization
+#   APPLE_TEAM_ID       Developer team id
+#   APPLE_APP_PASSWORD  App-specific password for that Apple ID
+#
+# The release is created as a draft. Review the notes and the attached DMG,
+# then publish it by hand.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build (e.g. v0.3.0)
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Check signing secrets are present
+        env:
+          DEVELOPER_ID: ${{ secrets.DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          missing=""
+          for v in DEVELOPER_ID APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            [ -n "${!v:-}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            printf 'release: missing repository secrets:%s\n' "$missing" >&2
+            exit 1
+          fi
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Test before shipping
+        run: |
+          brew install shellcheck ruff jq
+          bash scripts/test_plugin.sh
+          swift test
+
+      - name: Build, sign, notarize, package
+        env:
+          DEVELOPER_ID: ${{ secrets.DEVELOPER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: bash scripts/release.sh
+
+      - name: Publish draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          test -f .build/ContextBuddy.dmg || {
+            printf 'release: .build/ContextBuddy.dmg was not produced\n' >&2
+            exit 1
+          }
+          gh release create "$TAG" \
+            --draft \
+            --generate-notes \
+            --title "$TAG" \
+            .build/ContextBuddy.dmg
