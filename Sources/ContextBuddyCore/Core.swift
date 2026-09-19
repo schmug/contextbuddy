@@ -18,6 +18,13 @@ public actor BuddyCore {
         // session dir's meta.json (§4.9). nil for sessions graded before the
         // hook recorded it; the popover then falls back to the hash.
         public let projectPath: String?
+        // Name for the popover's project footer row: the enclosing repository's
+        // directory name per SessionDiscovery.projectName(forPath:), which walks
+        // the filesystem to the git root (issue #42). Stored, not computed, so
+        // BuddyCore resolves it once per session hash next to the path rather
+        // than on every access. nil whenever projectPath is nil; the popover
+        // then falls back to the hash prefix.
+        public let projectName: String?
         public let lastGrade: Grade?
         public let pinnedHash: String?
         // The popover colours each score meter by its distance from that
@@ -30,6 +37,7 @@ public actor BuddyCore {
             state: BuddyState,
             projectHash: String?,
             projectPath: String? = nil,
+            projectName: String? = nil,
             lastGrade: Grade?,
             pinnedHash: String?,
             thresholds: Config.Thresholds = Config.defaults.thresholds
@@ -37,14 +45,10 @@ public actor BuddyCore {
             self.state = state
             self.projectHash = projectHash
             self.projectPath = projectPath
+            self.projectName = projectName
             self.lastGrade = lastGrade
             self.pinnedHash = pinnedHash
             self.thresholds = thresholds
-        }
-
-        // Name for the popover's project footer row; nil when unknown.
-        public var projectName: String? {
-            projectPath.flatMap { SessionDiscovery.projectName(forPath: $0) }
         }
     }
 
@@ -66,10 +70,19 @@ public actor BuddyCore {
     private var currentHash: String?
     private var config: Config = .defaults
     private var configMTime: Date?
-    // Resolved project paths by hash. Only hits are cached, so a session dir
-    // that gains a meta.json later (the plugin rewrites it every turn) is
-    // picked up on the next snapshot instead of being negatively cached.
-    private var projectPaths: [String: String] = [:]
+    // Resolved project identity by hash: the recorded path and the display
+    // name derived from it. Only hits are cached, so a session dir that gains
+    // a meta.json later (the plugin rewrites it every turn) is picked up on
+    // the next snapshot instead of being negatively cached. The name is cached
+    // with the path because resolving it walks up the filesystem to the git
+    // root (issue #42), and that walk must not run on every snapshot. A repo
+    // that appears around the path after the first resolve is not noticed
+    // until restart; the path is cached for the process lifetime the same way.
+    private struct ProjectIdentity {
+        let path: String
+        let name: String?
+    }
+    private var projects: [String: ProjectIdentity] = [:]
 
     private var subscriber: AsyncStream<Snapshot>.Continuation?
     private var watcherTask: Task<Void, Never>?
@@ -364,13 +377,17 @@ public actor BuddyCore {
         }
     }
 
-    private func resolveProjectPath(for hash: String) -> String? {
-        if let cached = projectPaths[hash] { return cached }
+    private func resolveProject(for hash: String) -> ProjectIdentity? {
+        if let cached = projects[hash] { return cached }
         guard let path = SessionDiscovery.projectPath(
             inSessionDirectory: sessionsRoot.appendingPathComponent(hash)
         ) else { return nil }
-        projectPaths[hash] = path
-        return path
+        let identity = ProjectIdentity(
+            path: path,
+            name: SessionDiscovery.projectName(forPath: path)
+        )
+        projects[hash] = identity
+        return identity
     }
 
     private func makeSnapshot() -> Snapshot {
@@ -378,11 +395,12 @@ public actor BuddyCore {
         // Resolved here rather than at each currentHash assignment so every
         // path that changes the current session — bootstrap, watcher event,
         // and an explicit pin — carries the project identity for free.
-        let projectPath = currentHash.flatMap { resolveProjectPath(for: $0) }
+        let project = currentHash.flatMap { resolveProject(for: $0) }
         return Snapshot(
             state: state,
             projectHash: currentHash,
-            projectPath: projectPath,
+            projectPath: project?.path,
+            projectName: project?.name,
             lastGrade: lastGrade,
             pinnedHash: pinnedHash,
             thresholds: config.thresholds

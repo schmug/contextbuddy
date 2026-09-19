@@ -38,7 +38,9 @@ public struct SessionRef: Equatable, Sendable {
         self.projectPath = projectPath
     }
 
-    // Display name for the popover's project footer row.
+    // Display name for the popover's project footer row. Computed on access
+    // because it walks the filesystem to the git root (issue #42); the snapshot
+    // path goes through BuddyCore, which caches the name per session hash.
     public var projectName: String? {
         projectPath.flatMap { SessionDiscovery.projectName(forPath: $0) }
     }
@@ -108,18 +110,81 @@ public struct SessionDiscovery: Sendable {
         return decoded.projectPath
     }
 
-    // Last path component of an absolute project path, e.g. "contextbuddy".
-    // Deliberately not the full path: it would leak /Users/<username>/… into a
-    // screenshot-able UI and would not fit the 320pt popover.
+    // Display name for an absolute project path: the name of the repository it
+    // sits in (issue #42). Walks up from the path to the nearest ancestor that
+    // holds a `.git` entry. A `.git` directory names that ancestor. A `.git`
+    // file is a linked worktree's pointer, `gitdir: <main>/.git/worktrees/<n>`,
+    // and names the main checkout instead — the worktree directory name
+    // ("objective-cerf-9a0580") is exactly what the footer row must not show.
+    // A `.git` file that is anything else (unreadable, empty, a submodule's
+    // `gitdir: ../.git/modules/<n>`, a `--separate-git-dir` checkout) names the
+    // directory holding it, which is that checkout's own name. With no `.git`
+    // above the path — outside any repo, or a project deleted since the hook
+    // recorded it — the name is the last path component, as before #42.
     //
-    // Deliberately not smarter than the last component either. In a git worktree
-    // this yields the worktree directory name (e.g. "objective-cerf-9a0580"),
-    // not the repo name — walking up to the git root is a follow-up, not this.
+    // Deliberately not the full path: it would leak /Users/<username>/… into a
+    // screenshot-able UI and would not fit the 320pt popover. The popover's
+    // tooltip keeps the recorded path; this only changes the label.
+    //
+    // Reads the filesystem directly and never shells out to git: one stat per
+    // ancestor plus one small file read. BuddyCore caches the result per session
+    // hash next to the path (Core.swift), so the walk does not run per snapshot.
     public static func projectName(forPath path: String) -> String? {
         guard !path.isEmpty else { return nil }
-        let name = URL(fileURLWithPath: path).lastPathComponent
-        guard !name.isEmpty, name != "/" else { return nil }
-        return name
+        let recorded = URL(fileURLWithPath: path)
+        let fallback = recorded.lastPathComponent
+        guard !fallback.isEmpty, fallback != "/" else { return nil }
+        return repositoryName(enclosing: recorded) ?? fallback
+    }
+
+    // Name of the nearest repository enclosing `url` (itself included), or nil
+    // when no ancestor holds a `.git` entry. The loop terminates because each
+    // step drops one path component and stops before the root.
+    static func repositoryName(enclosing url: URL) -> String? {
+        var directory = url.standardizedFileURL
+        while directory.pathComponents.count > 1 {
+            let gitEntry = directory.appendingPathComponent(".git")
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: gitEntry.path, isDirectory: &isDirectory) {
+                if isDirectory.boolValue { return directory.lastPathComponent }
+                return mainCheckoutName(fromGitFile: gitEntry) ?? directory.lastPathComponent
+            }
+            directory = directory.deletingLastPathComponent()
+        }
+        return nil
+    }
+
+    // A linked worktree's `.git` file holds one line, `gitdir: <path>`, where
+    // <path> is `<main checkout>/.git/worktrees/<worktree name>` — absolute as
+    // `git worktree add` writes it, or relative to the worktree after
+    // `git worktree repair --relative-paths`. Returns the main checkout's
+    // directory name. nil when the file cannot be read, has no gitdir line, or
+    // points anywhere other than a `worktrees/` entry under a `.git` directory.
+    static func mainCheckoutName(fromGitFile file: URL) -> String? {
+        guard let contents = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        let lines = contents.split(whereSeparator: { (character: Character) -> Bool in
+            character.isNewline
+        })
+        guard let line = lines.first(where: { (line: Substring) -> Bool in
+            line.hasPrefix("gitdir:")
+        }) else { return nil }
+        let target = line.dropFirst("gitdir:".count).trimmingCharacters(in: .whitespaces)
+        guard !target.isEmpty else { return nil }
+        let gitDirectory: URL
+        if target.hasPrefix("/") {
+            gitDirectory = URL(fileURLWithPath: target)
+        } else {
+            let worktree = file.deletingLastPathComponent()
+            gitDirectory = worktree.appendingPathComponent(target).standardizedFileURL
+        }
+        // ["/", …, "<main>", ".git", "worktrees", "<name>"]: the checkout is the
+        // component before `.git`, and index 0 is the filesystem root.
+        let components = gitDirectory.pathComponents
+        guard let gitIndex = components.lastIndex(of: ".git"), gitIndex > 1 else { return nil }
+        guard gitIndex + 1 < components.count, components[gitIndex + 1] == "worktrees" else {
+            return nil
+        }
+        return components[gitIndex - 1]
     }
 
     public static var defaultRoot: URL {

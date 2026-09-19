@@ -68,7 +68,10 @@ final class CoreTests: XCTestCase {
     func testSnapshotCarriesProjectNameFromMetaJson() async throws {
         // The popover's project footer row reads Snapshot, so the name has to
         // survive the trip from the session dir through BuddyCore (issue #38).
-        let path = "/Users/cory/dev/contextbuddy"
+        // Under the temp root, never a host-absolute path: the resolver walks
+        // up to the nearest `.git`, so a hard-coded path would name whatever
+        // repository this machine keeps above it.
+        let path = inspectorRoot.appendingPathComponent("projects/contextbuddy").path
         let hash = SessionDiscovery.projectHash(for: path)
         try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
         try writeMeta(hash: hash, projectPath: path)
@@ -82,8 +85,8 @@ final class CoreTests: XCTestCase {
     func testPinningAnotherSessionSwitchesTheProjectName() async throws {
         // Acceptance for issue #38: the footer row must follow the active
         // session, not stay on whichever one the popover opened with.
-        let mruPath = "/Users/cory/dev/dmarcheck"
-        let pinnedPath = "/Users/cory/dev/contextbuddy"
+        let mruPath = inspectorRoot.appendingPathComponent("projects/dmarcheck").path
+        let pinnedPath = inspectorRoot.appendingPathComponent("projects/contextbuddy").path
         let mruHash = SessionDiscovery.projectHash(for: mruPath)
         let pinnedHash = SessionDiscovery.projectHash(for: pinnedPath)
         try writeFixtureGrade(hash: mruHash, fixture: "example1_pre_turn14", mtimeAge: 5)
@@ -102,6 +105,36 @@ final class CoreTests: XCTestCase {
         await core.pinSession(nil)
         snap = await core.currentSnapshot()
         XCTAssertEqual(snap.projectName, "dmarcheck", "unpin snaps back to the MRU's project")
+    }
+
+    func testSnapshotProjectNameIsTheRepoRootResolvedOncePerSessionHash() async throws {
+        // Issue #42 at the Core level. The recorded path sits two levels below
+        // a fabricated checkout, so the name can only come from the walk up to
+        // `.git`. Deleting `.git` between two snapshots then pins the hard
+        // constraint: the walk runs once per session hash, and a later
+        // snapshot reports the cached name without touching the filesystem.
+        // Without the cache the second snapshot would walk again, find no
+        // repository, and fall back to "ContextBuddyCore".
+        let checkout = inspectorRoot.appendingPathComponent("repos/contextbuddy")
+        let gitDirectory = checkout.appendingPathComponent(".git")
+        let recorded = checkout.appendingPathComponent("Sources/ContextBuddyCore")
+        try FileManager.default.createDirectory(at: gitDirectory, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: recorded, withIntermediateDirectories: true)
+        let hash = SessionDiscovery.projectHash(for: recorded.path)
+        try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
+        try writeMeta(hash: hash, projectPath: recorded.path)
+
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        var snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.projectName, "contextbuddy", "the git root names the project, not the cwd")
+
+        try FileManager.default.removeItem(at: gitDirectory)
+        snap = await core.currentSnapshot()
+        XCTAssertEqual(
+            snap.projectName,
+            "contextbuddy",
+            "resolved once per session hash: a later snapshot never walks the filesystem again"
+        )
     }
 
     func testSnapshotProjectNameIsNilWithoutMetaJson() async throws {
