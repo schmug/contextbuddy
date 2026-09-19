@@ -83,3 +83,28 @@ struct StatusIconView: View {
         }
     }
 }
+
+// Applies the §9.1 style for a state to the menubar button.
+//
+// Extracted from MenubarController.renderIcon() so ContextBuddyAppTests can
+// render the same pixels into an offscreen NSButton — the controller's own
+// button belongs to a live NSStatusItem, which a test process cannot create.
+// MenubarController.renderIcon() must stay a thin caller of this, or the tests
+// stop covering what ships.
+enum StatusItemIcon {
+    @MainActor
+    static func apply(state: BuddyState, animationsEnabled: Bool, to button: NSButton) {
+        let style = IconStyle.style(for: state, animationsEnabled: animationsEnabled)
+        let image = NSImage(systemSymbolName: style.symbol, accessibilityDescription: state.rawValue)
+        // A template image is the only kind NSButton recolors with
+        // contentTintColor. Setting this to `false` makes the button draw SF
+        // Symbols' own rendering instead — black for the monochrome symbols,
+        // the multicolor variant for the rest — and silently discards every
+        // tint in the table above (#34). ContextBuddyAppTests measures the
+        // rendered pixels, so flipping it back fails the suite.
+        image?.isTemplate = true
+        button.image = image
+        button.contentTintColor = style.tint
+        button.toolTip = "ContextBuddy: \(state.rawValue)"
+    }
+}

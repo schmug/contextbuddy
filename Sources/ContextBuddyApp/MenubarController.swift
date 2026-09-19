@@ -84,12 +84,7 @@ final class MenubarController: NSObject, NSMenuDelegate {
 
     private func renderIcon() {
         guard let button = statusItem.button else { return }
-        let style = IconStyle.style(for: snapshot.state, animationsEnabled: animationsEnabled)
-        let image = NSImage(systemSymbolName: style.symbol, accessibilityDescription: snapshot.state.rawValue)
-        image?.isTemplate = false
-        button.image = image
-        button.contentTintColor = style.tint
-        button.toolTip = "ContextBuddy: \(snapshot.state.rawValue)"
+        StatusItemIcon.apply(state: snapshot.state, animationsEnabled: animationsEnabled, to: button)
     }
 
     private func updatePopover() {
