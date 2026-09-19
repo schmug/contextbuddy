@@ -290,14 +290,14 @@ inspect_model = "claude-sonnet-4-6"
 [grader.typesafe]           # used when backend = "typesafe" (issue #8)
 api_key_env = "TYPESAFE_API_KEY"     # name of the env var holding the key; the key is never in this file
 endpoint = "https://api.typesafe.ai"
-task_gate = 0.5             # is_task probability below which the turn is not graded
-harm_action = 0.7           # destructive/bypass probability treated as actionable
+task_gate = 0.5             # is_task probability (0 to 1) below which the turn is not graded
+harm_action = 0.7           # destructive/bypass probability (0 to 1) treated as actionable
 
 [ui]
 animations_enabled = true
 ```
 
-Unknown sections and keys are rejected, and a rejected file falls back to compiled-in defaults as a whole (§13). Adding a key means adding it to `Config.parse` first.
+Unknown sections and keys are rejected, and a rejected file falls back to compiled-in defaults as a whole (§13). Adding a key means adding it to `Config.parse` first. `task_gate` and `harm_action` outside 0 to 1, and a `[grader.typesafe].endpoint` that is not `https://` and not a loopback host (`localhost`, `127.0.0.1`, `::1`), are rejected the same way; the hooks substitute the per-key default for the gates and `jev.mjs` refuses the endpoint with exit 2.
 
 The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required.
 

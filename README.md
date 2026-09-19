@@ -248,7 +248,7 @@ loop_window_turns = 3
 context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit: see Context window)
 
 [grader]
-backend = "anthropic"       # "anthropic" | "ollama" | "openai_compatible"
+backend = "anthropic"       # "anthropic" | "ollama" | "openai_compatible" | "typesafe"
 model = "claude-haiku-4-5-20251001"
 sliding_window_turns = 3
 inspect_model = "claude-sonnet-4-6"
@@ -259,6 +259,12 @@ endpoint = "http://localhost:11434"
 [grader.openai_compatible]  # used when backend = "openai_compatible"
 endpoint = "http://localhost:1234/v1"
 api_key_env = ""            # name of an env var holding a bearer token; "" = no auth
+
+[grader.typesafe]           # used when backend = "typesafe"
+api_key_env = "TYPESAFE_API_KEY"     # NAME of the env var holding the key, never the key
+endpoint = "https://api.typesafe.ai"
+task_gate = 0.5             # is_task probability (0 to 1) below which the turn is not graded
+harm_action = 0.7           # destructive/bypass probability (0 to 1) treated as actionable
 
 [ui]
 animations_enabled = true
@@ -355,7 +361,7 @@ task_gate = 0.5                      # is_task probability below which the turn 
 harm_action = 0.7                    # destructive/bypass probability treated as actionable
 ```
 
-Every key is optional and the values above are the defaults. `api_key_env` follows the `openai_compatible` pattern: the key itself lives only in the environment or a `.env`, never in `config.toml`.
+Every key is optional and the values above are the defaults. `api_key_env` follows the `openai_compatible` pattern: the key itself lives only in the environment or a `.env`, never in `config.toml`. Its value must be a plain environment-variable identifier (`^[A-Za-z_][A-Za-z0-9_]*$`); anything else makes `invoke.sh` exit 2 and skip the grade. `task_gate` and `harm_action` must be between `0` and `1` (`task_gate = 50` is rejected: the hooks fall back to the default, and the app's parser drops the whole file to defaults as it does for any bad value). `endpoint` must be `https://` unless its host is loopback (`localhost`, `127.0.0.1`, `::1`); `jev.mjs` refuses anything else with exit 2, and the request never follows a redirect.
 
 ```bash
 export TYPESAFE_API_KEY=...        # or whatever api_key_env names, in the environment

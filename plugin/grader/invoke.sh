@@ -114,7 +114,9 @@ case "$BACKEND" in
     # always receives the value as TYPESAFE_API_KEY, whatever the source name.
     # The name must be a shell identifier: it is expanded with ${!name} and
     # grepped for by dotenv_value, and config.toml is not a place to pick a
-    # variable name that bash or grep would read as syntax.
+    # variable name that bash or grep would read as syntax. LC_ALL=C because
+    # bracket ranges follow the locale: the identifier must be ASCII whatever
+    # locale the hook inherited.
     NODE_BIN="${CONTEXTBUDDY_NODE:-}"
     if [ -z "$NODE_BIN" ]; then
       NODE_BIN="$(command -v node 2>/dev/null || true)"
@@ -132,7 +134,7 @@ case "$BACKEND" in
     fi
     api_key_env="$(toml_get_section_key "$CONFIG_PATH" "grader.typesafe" "api_key_env")"
     api_key_env="${api_key_env:-TYPESAFE_API_KEY}"
-    if ! printf '%s' "$api_key_env" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    if ! printf '%s' "$api_key_env" | LC_ALL=C grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
       printf 'contextbuddy: [grader.typesafe].api_key_env is not an environment variable name — grader skipped.\n' >&2
       exit 2
     fi

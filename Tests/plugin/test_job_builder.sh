@@ -52,6 +52,12 @@ check "job never carries the API key or its env var name" '(tostring | test("sk-
 printf '[grader]\nbackend = "typesafe"\n\n[grader.typesafe]\ntask_gate = "half"\nharm_action = 0.9\n' > "$ws/config.toml"
 job="$(build_job "pre" 14 "t" "$payload" "$ws/session.md" "$ws/history.jsonl" "$ws/config.toml")"
 check "a non-numeric task_gate falls back to the default" '.task_gate==0.5 and .harm_action==0.9'
+# Above 1 is treated like a malformed value (`task_gate = 50` is percent
+# confusion, not a probability, and would gate every turn); 1.0 is the top
+# of the range and stands.
+printf '[grader]\nbackend = "typesafe"\n\n[grader.typesafe]\ntask_gate = 50\nharm_action = 1.0\n' > "$ws/config.toml"
+job="$(build_job "pre" 14 "t" "$payload" "$ws/session.md" "$ws/history.jsonl" "$ws/config.toml")"
+check "a task_gate above 1 falls back to the default; 1.0 stands" '.task_gate==0.5 and .harm_action==1'
 
 job="$(build_job "post" 1 "t" "$payload" "$ws/nope.md" "$ws/nohistory.jsonl" "$ws/config.toml")"
 check "missing session.md yields null anchor" '.session_md==null'

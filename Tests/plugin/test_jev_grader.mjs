@@ -304,6 +304,31 @@ test('grade gates on job.task_gate and sends the request to job.endpoint unless 
   assert.equal(overridden.url, 'http://127.0.0.1:2/v1/systemone')
 })
 
+// A single POST to a fixed path has no legitimate redirect; following one would forward the
+// Bearer key to wherever the server pointed.
+test('request sets redirect: "error" so a redirect never forwards the Bearer key', async () => {
+  const capture = {}
+  await grader.grade(baseJob(), { fetchImpl: fakeFetch(ex1, { capture }), env })
+  assert.equal(capture.init.redirect, 'error')
+})
+
+// The base URL carries the Bearer key: plaintext http is only allowed to a loopback host.
+// The config-driven base (job.endpoint) and the env override (TYPESAFE_BASE_URL) follow the
+// same rule; Config.parse in Sources/ContextBuddyCore/Schemas.swift mirrors it.
+test('grade refuses a non-loopback http endpoint with exit code 2 before any request', async () => {
+  let called = false
+  const never = async () => { called = true }
+  await assert.rejects(grader.grade(baseJob({ endpoint: 'http://api.example.com' }), { fetchImpl: never, env }), e => e.exitCode === 2 && /https/.test(e.message))
+  await assert.rejects(grader.grade(baseJob(), { fetchImpl: never, env: { ...env, TYPESAFE_BASE_URL: 'http://api.example.com' } }), e => e.exitCode === 2)
+  await assert.rejects(grader.grade(baseJob({ endpoint: 'not a url' }), { fetchImpl: never, env }), e => e.exitCode === 2)
+  assert.equal(called, false, 'no request is sent to a refused endpoint')
+  for (const base of ['https://api.example.com', 'http://localhost:1', 'http://127.0.0.1:1', 'http://[::1]:1']) {
+    const capture = {}
+    await grader.grade(baseJob({ endpoint: base }), { fetchImpl: fakeFetch(ex1, { capture }), env })
+    assert.equal(capture.url, `${base}/v1/systemone`)
+  }
+})
+
 test('grade resolves the window from the transcript model when the job carries no tokens_limit, and floors an impossible one', async () => {
   const job = baseJob(); delete job.tokens_limit
   const r = await grader.grade(job, { fetchImpl: fakeFetch(ex1), env })

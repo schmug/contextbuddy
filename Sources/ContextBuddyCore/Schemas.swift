@@ -531,7 +531,7 @@ public extension Config {
                 case "api_key_env":
                     grader.typesafe.apiKeyEnv = try parseString(valueRaw, section: section, key: key)
                 case "endpoint":
-                    grader.typesafe.endpoint = try parseString(valueRaw, section: section, key: key)
+                    grader.typesafe.endpoint = try parseEndpoint(valueRaw, section: section, key: key)
                 case "task_gate":
                     grader.typesafe.taskGate = try parseDouble(valueRaw, section: section, key: key)
                 case "harm_action":
@@ -584,12 +584,35 @@ private func parseInt(_ value: String, section: String, key: String) throws -> I
     throw ConfigParseError.typeMismatch(section: section, key: key, expected: "integer", got: value)
 }
 
-// TOML float or integer literal ("0.5", "1"). Sign, exponent and underscore
-// forms are rejected: the only float keys are unit-interval gates.
+// TOML float or integer literal inside the unit interval: "0", "0.5", "1",
+// "1.0". Sign, exponent, underscore and leading-zero forms are rejected, as
+// are ".5", "1." and anything above 1: the only float keys are probability
+// gates, and `task_gate = 50` (percent confusion) would otherwise gate every
+// turn. The accepted shape matches toml_get_section_float in
+// plugin/lib/config.sh, so both parsers agree on every literal.
 private func parseDouble(_ value: String, section: String, key: String) throws -> Double {
-    let plain = value.allSatisfy { $0.isNumber || $0 == "." }
-    if plain, let v = Double(value) { return v }
-    throw ConfigParseError.typeMismatch(section: section, key: key, expected: "float", got: value)
+    let parts = value.split(separator: ".", omittingEmptySubsequences: false)
+    let whole = parts.count <= 2 && (parts[0] == "0" || parts[0] == "1")
+    let fraction = parts.count == 1 || (!parts[1].isEmpty && parts[1].allSatisfy { $0.isASCII && $0.isNumber })
+    if whole, fraction, let v = Double(value), v <= 1 { return v }
+    throw ConfigParseError.typeMismatch(section: section, key: key, expected: "float in 0...1", got: value)
+}
+
+// [grader.typesafe].endpoint receives the Bearer key, so plaintext http is
+// only allowed to a loopback host. Mirrors endpointSchemeError in
+// plugin/grader/jev.mjs, which applies the same rule at request time.
+private func parseEndpoint(_ value: String, section: String, key: String) throws -> String {
+    let raw = try parseString(value, section: section, key: key)
+    let url = URL(string: raw)
+    let scheme = url?.scheme?.lowercased() ?? ""
+    let host = (url?.host(percentEncoded: false) ?? "").lowercased()
+    let bare = host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
+    let loopback = bare == "localhost" || bare == "127.0.0.1" || bare == "::1"
+    if scheme == "https" || (scheme == "http" && loopback) { return raw }
+    throw ConfigParseError.typeMismatch(
+        section: section, key: key,
+        expected: "https:// URL (http:// only for localhost, 127.0.0.1, ::1)", got: raw
+    )
 }
 
 private func parseBool(_ value: String, section: String, key: String) throws -> Bool {
