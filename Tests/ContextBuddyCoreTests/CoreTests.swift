@@ -27,6 +27,34 @@ final class CoreTests: XCTestCase {
         XCTAssertNil(snap.lastGrade)
     }
 
+    // The popover colours each score meter by its distance from that
+    // dimension's own attention threshold, so the thresholds have to reach the
+    // view. `config` is private to the actor; Snapshot is the only channel.
+    func testSnapshotCarriesDefaultThresholds() async throws {
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.thresholds, Config.defaults.thresholds)
+    }
+
+    func testSnapshotCarriesThresholdsFromConfigFile() async throws {
+        try """
+        [thresholds]
+        confidence_attention = 9
+        pollution_attention = 2
+        """.write(
+            to: inspectorRoot.appendingPathComponent("config.toml"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.thresholds.confidenceAttention, 9)
+        XCTAssertEqual(snap.thresholds.pollutionAttention, 2)
+        XCTAssertEqual(snap.thresholds.driftAttention, Config.defaults.thresholds.driftAttention,
+                       "unset keys keep their compiled-in default")
+    }
+
     func testBootstrapFromExistingLastJsonFromDisk() async throws {
         let hash = "aaaaaaaaaaaa"
         try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
