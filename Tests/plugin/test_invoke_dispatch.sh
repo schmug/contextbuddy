@@ -316,6 +316,44 @@ test_typesafe_key_from_dotenv() {
   rm -rf "$ws"
 }
 
+test_typesafe_key_from_api_key_env() {
+  # Issue #8: [grader.typesafe].api_key_env names the variable holding the key
+  # (default TYPESAFE_API_KEY). The child still receives it as TYPESAFE_API_KEY;
+  # the mock node exits 9 if that is absent.
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  printf '\n[grader.typesafe]\napi_key_env = "MY_JEV_KEY"\n' >> "$ws/cfg/config.toml"
+  local actual
+  actual="$( unset TYPESAFE_API_KEY
+    cd "$ws" && RESP_DIR="$ws" PATH="$ws/bin:$PATH" MY_JEV_KEY=k CONTEXTBUDDY_JOB="$ws/job.json" \
+      "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" 2>/dev/null )"
+  assert_emits_expected "typesafe key read from the env var named by api_key_env" "$actual"
+  local rc=0
+  ( unset TYPESAFE_API_KEY MY_JEV_KEY
+    cd "$ws" && PATH="$ws/bin:$PATH" CONTEXTBUDDY_JOB="$ws/job.json" \
+      "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" >/dev/null 2>&1 ) || rc=$?
+  if [ "$rc" -eq 5 ]; then pass "typesafe with api_key_env set but the variable unset exits 5"; else fail "typesafe api_key_env unset: expected exit 5, got $rc"; fi
+  rm -rf "$ws"
+}
+
+test_typesafe_api_key_env_not_an_identifier_exits_2() {
+  # The configured name becomes a shell variable name (${!name}) and a grep
+  # pattern in lib/dotenv.sh; anything but an identifier is refused before
+  # either expansion runs, with a clean exit rather than a bash error.
+  local ws; ws="$(make_workspace)"
+  stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
+  printf '\n[grader.typesafe]\napi_key_env = "A B;.*"\n' >> "$ws/cfg/config.toml"
+  local rc=0 err
+  err="$( cd "$ws" && PATH="$ws/bin:$PATH" TYPESAFE_API_KEY=k CONTEXTBUDDY_JOB="$ws/job.json" \
+      "$INVOKE" "$ws/system.md" "$ws/user.md" "jev-1.13.0" "$ws/cfg/config.toml" 2>&1 >/dev/null )" || rc=$?
+  if [ "$rc" -eq 2 ] && printf '%s' "$err" | grep -q '^contextbuddy: .*api_key_env'; then
+    pass "typesafe api_key_env that is not an identifier exits 2 with a contextbuddy: line"
+  else
+    fail "typesafe bad api_key_env: expected exit 2 + contextbuddy: line, got exit $rc: $err"
+  fi
+  rm -rf "$ws"
+}
+
 test_typesafe_missing_job_exits_2() {
   local ws; ws="$(make_workspace)"
   stage_prompts "$ws"; build_envelopes "$ws"; write_node_mock "$ws/bin"; typesafe_config "$ws"
@@ -340,6 +378,8 @@ test_typesafe_dispatch
 test_typesafe_gated_exits_0_empty
 test_typesafe_missing_key_exits_5
 test_typesafe_key_from_dotenv
+test_typesafe_key_from_api_key_env
+test_typesafe_api_key_env_not_an_identifier_exits_2
 test_typesafe_missing_job_exits_2
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

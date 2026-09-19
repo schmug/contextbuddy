@@ -486,6 +486,19 @@ export class GraderError extends Error {
 const DEFAULT_BASE_URL = 'https://api.typesafe.ai'
 const REQUEST_TIMEOUT_MS = 15000
 
+// The base URL receives the Bearer key: plaintext http is only allowed to a loopback host.
+// Returns null when `base` is acceptable, else the reason. Config.parse in
+// Sources/ContextBuddyCore/Schemas.swift rejects the same endpoints when the app reads
+// config.toml; this is the check at the point of use, for the env override as well.
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]'])
+export function endpointSchemeError(base) {
+  let url
+  try { url = new URL(base) } catch { return `endpoint is not a URL: ${base}` }
+  if (url.protocol === 'https:') return null
+  if (url.protocol === 'http:' && LOOPBACK_HOSTS.has(url.hostname)) return null
+  return `endpoint must be https:// unless its host is loopback (localhost, 127.0.0.1, ::1): ${base}`
+}
+
 // One System One request. Everything about the wire format lives here.
 export async function request({ state, model, key, fetchImpl, baseUrl, timeoutMs = REQUEST_TIMEOUT_MS }) {
   const url = `${(baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '')}/v1/systemone`
@@ -493,11 +506,14 @@ export async function request({ state, model, key, fetchImpl, baseUrl, timeoutMs
   const timer = setTimeout(() => ctl.abort(), timeoutMs)
   let res
   try {
+    // One POST to a fixed path has no legitimate redirect, and following one would forward
+    // the Bearer key to wherever the server pointed; a redirect is a request failure (exit 3).
     res = await fetchImpl(url, {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, state, questions: QUESTIONS }),
       signal: ctl.signal,
+      redirect: 'error',
     })
   } catch (e) {
     throw new GraderError(3, `request failed: ${e?.message || e}`)
@@ -547,9 +563,16 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
     phase,
   })
 
-  const response = await request({ state, model: job.model || 'jev-1.13.0', key, fetchImpl, baseUrl: env.TYPESAFE_BASE_URL })
+  // Issue #8: [grader.typesafe].endpoint and task_gate arrive in the job (lib/job.sh);
+  // TYPESAFE_BASE_URL in the environment still overrides the endpoint. harm_action rides
+  // along for the hooks; nothing here acts on it yet.
+  const baseUrl = env.TYPESAFE_BASE_URL || (typeof job.endpoint === 'string' && job.endpoint ? job.endpoint : undefined)
+  const schemeError = endpointSchemeError(baseUrl || DEFAULT_BASE_URL)
+  if (schemeError) throw new GraderError(2, `${schemeError} — grader skipped`)
+  const taskGate = typeof job.task_gate === 'number' ? job.task_gate : 0.5
+  const response = await request({ state, model: job.model || 'jev-1.13.0', key, fetchImpl, baseUrl })
   const answers = response.answers
-  if (isTaskGated(answers)) return { gated: true, is_task: answers.is_task.noul, usage: response.usage }
+  if (isTaskGated(answers, taskGate)) return { gated: true, is_task: answers.is_task.noul, usage: response.usage }
 
   const pollution = phase === 'pre' ? carryPollution(job.prior_pollution) : mechanicalPollution(text)
   const thresholds = { confidence_attention: 4, atomicity_attention: 4, drift_attention: 6, pollution_attention: 7, ...(job.thresholds || {}) }

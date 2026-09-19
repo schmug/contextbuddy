@@ -31,6 +31,17 @@ endpoint = "http://localhost:11434"
 endpoint = "http://localhost:1234/v1"
 api_key_env = ""
 
+# Used when backend = "typesafe" (TypeSafe Jev via plugin/grader/jev.mjs).
+# api_key_env is the *name* of the environment variable holding the key
+# (never the key). task_gate: is_task probability below which the turn is
+# not graded. harm_action: destructive/bypass probability treated as
+# actionable. TYPESAFE_BASE_URL in the environment overrides endpoint.
+[grader.typesafe]
+api_key_env = "TYPESAFE_API_KEY"
+endpoint = "https://api.typesafe.ai"
+task_gate = 0.5
+harm_action = 0.7
+
 [ui]
 animations_enabled = true
 token_row_pct = 70

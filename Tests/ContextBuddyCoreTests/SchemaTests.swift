@@ -223,6 +223,10 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(cfg.grader.ollama.endpoint, "http://localhost:11434")
         XCTAssertEqual(cfg.grader.openaiCompatible.endpoint, "http://localhost:1234/v1")
         XCTAssertEqual(cfg.grader.openaiCompatible.apiKeyEnv, "")
+        XCTAssertEqual(cfg.grader.typesafe.apiKeyEnv, "TYPESAFE_API_KEY")
+        XCTAssertEqual(cfg.grader.typesafe.endpoint, "https://api.typesafe.ai")
+        XCTAssertEqual(cfg.grader.typesafe.taskGate, 0.5)
+        XCTAssertEqual(cfg.grader.typesafe.harmAction, 0.7)
         XCTAssertTrue(cfg.ui.animationsEnabled)
         XCTAssertEqual(cfg.ui.tokenRowPct, 70)
     }
@@ -255,6 +259,111 @@ final class SchemaTests: XCTestCase {
         XCTAssertEqual(parsed.grader.backend, "openai_compatible")
         XCTAssertEqual(parsed.grader.openaiCompatible.endpoint, "http://localhost:8000/v1")
         XCTAssertEqual(parsed.grader.openaiCompatible.apiKeyEnv, "MY_LOCAL_KEY")
+    }
+
+    // Issue #8: before the section was known, `[grader.typesafe]` threw
+    // unknownSection and Config.load fell back to defaults for the whole
+    // file, thresholds included. The section must parse and leave the
+    // thresholds the file set.
+    func testConfigParsesTypesafeBackendWithThresholdsIntact() throws {
+        let source = """
+        [thresholds]
+        atomicity_attention = 5
+
+        [grader]
+        backend = "typesafe"
+        model = "jev-1.13.0"
+
+        [grader.typesafe]
+        api_key_env = "MY_JEV_KEY"
+        endpoint = "http://127.0.0.1:8080"
+        task_gate = 0.6
+        harm_action = 0.9
+        """
+        let parsed = try Config.parse(source)
+        XCTAssertEqual(parsed.thresholds.atomicityAttention, 5)
+        XCTAssertEqual(parsed.grader.backend, "typesafe")
+        XCTAssertEqual(parsed.grader.typesafe.apiKeyEnv, "MY_JEV_KEY")
+        XCTAssertEqual(parsed.grader.typesafe.endpoint, "http://127.0.0.1:8080")
+        XCTAssertEqual(parsed.grader.typesafe.taskGate, 0.6)
+        XCTAssertEqual(parsed.grader.typesafe.harmAction, 0.9)
+    }
+
+    func testConfigTypesafeUnknownKeyStillThrows() {
+        let source = """
+        [grader.typesafe]
+        api_key = "sk-never-in-config"
+        """
+        XCTAssertThrowsError(try Config.parse(source)) { error in
+            XCTAssertEqual(
+                error as? ConfigParseError,
+                .unknownKey(section: "grader.typesafe", key: "api_key")
+            )
+        }
+    }
+
+    func testConfigTypesafeGateTypeMismatchThrows() {
+        let source = """
+        [grader.typesafe]
+        task_gate = "half"
+        """
+        XCTAssertThrowsError(try Config.parse(source)) { error in
+            guard case .typeMismatch(let section, let key, let expected, _) =
+                    (error as? ConfigParseError) else {
+                return XCTFail("expected typeMismatch, got \(error)")
+            }
+            XCTAssertEqual(section, "grader.typesafe")
+            XCTAssertEqual(key, "task_gate")
+            XCTAssertEqual(expected, "float in 0...1")
+        }
+    }
+
+    // task_gate and harm_action are probabilities. `task_gate = 50` (percent
+    // confusion) used to parse and gate every turn; anything outside 0...1 is
+    // now a typeMismatch, and so are the ".5", "1." and leading-zero forms the
+    // shell parser (plugin/lib/config.sh toml_get_section_float) already sends
+    // to the default. 1.0 is the top of the range and stands.
+    func testConfigTypesafeGateOutsideUnitIntervalThrows() throws {
+        let source = """
+        [grader.typesafe]
+        task_gate = 50
+        """
+        XCTAssertThrowsError(try Config.parse(source)) { error in
+            guard case .typeMismatch(let section, let key, _, let got) =
+                    (error as? ConfigParseError) else {
+                return XCTFail("expected typeMismatch, got \(error)")
+            }
+            XCTAssertEqual(section, "grader.typesafe")
+            XCTAssertEqual(key, "task_gate")
+            XCTAssertEqual(got, "50")
+        }
+        for literal in [".5", "1.", "1.5", "00.5"] {
+            XCTAssertThrowsError(try Config.parse("[grader.typesafe]\nharm_action = \(literal)"), literal)
+        }
+        let top = try Config.parse("[grader.typesafe]\nharm_action = 1.0")
+        XCTAssertEqual(top.grader.typesafe.harmAction, 1.0)
+    }
+
+    // endpoint carries the Bearer key: plaintext http is only allowed to a
+    // loopback host. Mirrors endpointSchemeError in plugin/grader/jev.mjs.
+    func testConfigTypesafeEndpointRequiresHttpsUnlessLoopback() throws {
+        let source = """
+        [grader.typesafe]
+        endpoint = "http://api.example.com"
+        """
+        XCTAssertThrowsError(try Config.parse(source)) { error in
+            guard case .typeMismatch(let section, let key, _, _) =
+                    (error as? ConfigParseError) else {
+                return XCTFail("expected typeMismatch, got \(error)")
+            }
+            XCTAssertEqual(section, "grader.typesafe")
+            XCTAssertEqual(key, "endpoint")
+        }
+        let allowed = ["https://api.example.com", "http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"]
+        for url in allowed {
+            let parsed = try Config.parse("[grader.typesafe]\nendpoint = \"\(url)\"")
+            XCTAssertEqual(parsed.grader.typesafe.endpoint, url)
+        }
     }
 
     func testConfigParsesDefaultFile() throws {

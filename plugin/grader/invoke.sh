@@ -106,11 +106,17 @@ case "$BACKEND" in
     ;;
   typesafe)
     # Node grader (grader/jev.mjs). Needs the job file the hooks write
-    # (CONTEXTBUDDY_JOB), a Node 20+ runtime, and TYPESAFE_API_KEY from the
+    # (CONTEXTBUDDY_JOB), a Node 20+ runtime, and the API key from the
     # environment or a .env found by lib/dotenv.sh (hooks fired from the desktop
-    # app see no shell exports; same route as CONTEXTBUDDY_CLAUDE_CONFIG_DIR). No
-    # new config.toml keys: the Swift config parser rejects unknown keys and
-    # would then drop the whole file, thresholds included (issue #8).
+    # app see no shell exports; same route as CONTEXTBUDDY_CLAUDE_CONFIG_DIR).
+    # [grader.typesafe].api_key_env (issue #8) names the variable to read, default
+    # TYPESAFE_API_KEY, the same pattern as run_openai_compatible_once. The child
+    # always receives the value as TYPESAFE_API_KEY, whatever the source name.
+    # The name must be a shell identifier: it is expanded with ${!name} and
+    # grepped for by dotenv_value, and config.toml is not a place to pick a
+    # variable name that bash or grep would read as syntax. LC_ALL=C because
+    # bracket ranges follow the locale: the identifier must be ASCII whatever
+    # locale the hook inherited.
     NODE_BIN="${CONTEXTBUDDY_NODE:-}"
     if [ -z "$NODE_BIN" ]; then
       NODE_BIN="$(command -v node 2>/dev/null || true)"
@@ -126,10 +132,16 @@ case "$BACKEND" in
       printf 'contextbuddy: CONTEXTBUDDY_JOB not set or missing; typesafe backend needs the hook job file\n' >&2
       exit 2
     fi
-    TYPESAFE_KEY="${TYPESAFE_API_KEY:-}"
-    [ -n "$TYPESAFE_KEY" ] || TYPESAFE_KEY="$(dotenv_value TYPESAFE_API_KEY || true)"
+    api_key_env="$(toml_get_section_key "$CONFIG_PATH" "grader.typesafe" "api_key_env")"
+    api_key_env="${api_key_env:-TYPESAFE_API_KEY}"
+    if ! printf '%s' "$api_key_env" | LC_ALL=C grep -qE '^[A-Za-z_][A-Za-z0-9_]*$'; then
+      printf 'contextbuddy: [grader.typesafe].api_key_env is not an environment variable name — grader skipped.\n' >&2
+      exit 2
+    fi
+    TYPESAFE_KEY="${!api_key_env:-}"
+    [ -n "$TYPESAFE_KEY" ] || TYPESAFE_KEY="$(dotenv_value "$api_key_env" || true)"
     if [ -z "$TYPESAFE_KEY" ]; then
-      printf 'contextbuddy: TYPESAFE_API_KEY not set — grader skipped.\n' >&2
+      printf 'contextbuddy: %s not set — grader skipped.\n' "$api_key_env" >&2
       printf 'contextbuddy: export it in the environment Claude Code inherits, put it in a .env (see lib/dotenv.sh), or switch [grader].backend.\n' >&2
       exit 5
     fi

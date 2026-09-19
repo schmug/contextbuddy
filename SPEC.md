@@ -282,14 +282,23 @@ loop_window_turns = 3
 context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit per §5.4)
 
 [grader]
+backend = "anthropic"       # anthropic | ollama | openai_compatible | typesafe (README "Grader backends")
 model = "claude-haiku-4-5-20251001"
 sliding_window_turns = 3    # last N turns verbatim
 inspect_model = "claude-sonnet-4-6"
+
+[grader.typesafe]           # used when backend = "typesafe" (issue #8)
+api_key_env = "TYPESAFE_API_KEY"     # name of the env var holding the key; the key is never in this file
+endpoint = "https://api.typesafe.ai"
+task_gate = 0.5             # is_task probability (0 to 1) below which the turn is not graded
+harm_action = 0.7           # destructive/bypass probability (0 to 1) treated as actionable
 
 [ui]
 animations_enabled = true   # false: no icon motion. macOS Reduce Motion has the same effect; the two compose as AND (§9.6)
 token_row_pct = 70          # §9.3 ⚡ row is de-emphasized at or below this percent
 ```
+
+Unknown sections and keys are rejected, and a rejected file falls back to compiled-in defaults as a whole (§13). Adding a key means adding it to `Config.parse` first. `task_gate` and `harm_action` outside 0 to 1, and a `[grader.typesafe].endpoint` that is not `https://` and not a loopback host (`localhost`, `127.0.0.1`, `::1`), are rejected the same way; the hooks substitute the per-key default for the gates and `jev.mjs` refuses the endpoint with exit 2.
 
 The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required. The buddy also checks the file on its 30 s sleep tick, so an edit with no grade in flight lands within one tick.
 
