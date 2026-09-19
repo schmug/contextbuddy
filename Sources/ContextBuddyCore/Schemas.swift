@@ -20,6 +20,12 @@ public struct Grade: Codable, Equatable, Sendable {
     // Optional: only the typesafe/Jev backend emits it. Absent for the
     // anthropic, ollama and openai_compatible backends.
     public var signals: Signals?
+    // Optional, additive (issue #47): the session's Claude model id as read
+    // from the transcript (e.g. "claude-fable-5-1") and where tokens_limit
+    // came from: "override" | "autocompact" | "model" | "observed" | "default".
+    // Absent from grades written before #47; nil encodes as no key, not null.
+    public var model: String?
+    public var limitSource: String?
 
     public init(
         schemaVersion: Int = 1,
@@ -31,7 +37,9 @@ public struct Grade: Codable, Equatable, Sendable {
         tokensLimit: Int,
         dominantSignal: DominantSignal?,
         summaryUpdate: String,
-        signals: Signals? = nil
+        signals: Signals? = nil,
+        model: String? = nil,
+        limitSource: String? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.phase = phase
@@ -43,6 +51,8 @@ public struct Grade: Codable, Equatable, Sendable {
         self.dominantSignal = dominantSignal
         self.summaryUpdate = summaryUpdate
         self.signals = signals
+        self.model = model
+        self.limitSource = limitSource
     }
 }
 
