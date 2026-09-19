@@ -69,12 +69,16 @@ CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "contex
 
 # This turn's window, token count and edited files come from the JSONL transcript at
 # hook.transcript_path; the payload carries none of them (issue #9, lib/transcript.sh).
-# On post the window keeps this turn's prompt last. A missing or unreadable transcript
-# is an empty window plus a stderr warning, never a skip.
+# The window is the [grader] sliding_window_turns the typesafe job also reads
+# (lib/job.sh), default 3. On post the window keeps this turn's prompt last. A missing
+# or unreadable transcript is an empty window plus a stderr warning, never a skip.
+WINDOW_TURNS="$(toml_get_section_int "$CONFIG_PATH" "grader" "sliding_window_turns" 3)"
 TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
-WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" 3)"
+WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" "$WINDOW_TURNS")"
 TOKENS_LINE="$(tokens_from_window "$WINDOW_JSON")"
 TOKENS_USED_TX="${TOKENS_LINE%% *}"
+TOKENS_LIMIT_TX="${TOKENS_LINE##* }"
+TOKENS_TRUST="$(tokens_trust "$TOKENS_USED_TX" "$TOKENS_LIMIT_TX")"
 
 if command -v jq >/dev/null 2>&1; then
   EDITED_FILES_JSON="$(edited_files_from_window "$WINDOW_JSON")"
@@ -111,8 +115,8 @@ fi
   printf '## timestamp\n%s\n\n' "$TIMESTAMP"
   printf '## prior summary\n%s\n\n' "$(prior_summary "$PROJECT_HASH")"
   printf '## tokens\n%s\n\n' "$TOKENS_LINE"
-  printf '## last 3 turns (from hook transcript)\n```json\n%s\n```\n\n' \
-    "$(prompts_from_window "$WINDOW_JSON")"
+  printf '## last %s turns (from hook transcript)\n```json\n%s\n```\n\n' \
+    "$WINDOW_TURNS" "$(prompts_from_window "$WINDOW_JSON")"
   printf '## files edited in last 5 turns\n```json\n%s\n```\n\n' \
     "$(files_edited_recent "$PROJECT_HASH" 5)"
   printf '## completed turn\n%s\n' "$HOOK_PAYLOAD"
@@ -152,19 +156,27 @@ if command -v jq >/dev/null 2>&1; then
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
-  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): the
-  # transcript count replaces the model's copy of it, so context_pressure below is
-  # decided from the transcript. No transcript, or none with assistant usage yet
-  # (count 0), keeps whatever the grader reported.
-  if [ "$TOKENS_USED_TX" -gt 0 ] 2>/dev/null; then
-    GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c --argjson t "$TOKENS_USED_TX" '.tokens_used = $t')"
-  fi
+  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4). The
+  # transcript pair replaces both token fields in one failure-safe jq call only when
+  # 0 < used <= limit; above the limit the grader's fields stand, a warning goes to
+  # stderr and no context_pressure is derived (see user_prompt_submit.sh for the why).
+  case "$TOKENS_TRUST" in
+    ok)
+      NEW="$(printf '%s' "$GRADE_JSON" | jq -c --argjson u "$TOKENS_USED_TX" --argjson l "$TOKENS_LIMIT_TX" \
+        '.tokens_used = $u | .tokens_limit = $l' 2>/dev/null)" && [ -n "$NEW" ] && GRADE_JSON="$NEW"
+      ;;
+    over)
+      log_err "tokens_used $TOKENS_USED_TX exceeds tokens_limit $TOKENS_LIMIT_TX; limit unknown for this model, leaving the grader's token fields"
+      ;;
+  esac
 
   # Mechanically override dominant_signal: loop wins over context_pressure
-  # which wins over the grader's dimension choice.
+  # which wins over the grader's dimension choice. context_pressure reads the grade's
+  # own fields and is skipped when the transcript count exceeds the limit (the grader
+  # copied that same count from the bundle).
   if [ "$LOOP_DETECTED" = "true" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
-  else
+  elif [ "$TOKENS_TRUST" != "over" ]; then
     TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
     TOKENS_LIMIT="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_limit // 200000')"
     if [ "$TOKENS_LIMIT" -gt 0 ] && \

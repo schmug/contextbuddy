@@ -84,7 +84,7 @@ assert_one_line_per_grade() {
 }
 
 PRE_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"UserPromptSubmit","prompt":"hello there"}'
-POST_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop","tool_calls":[]}'
+POST_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop"}'
 # Loop detection reads this turn's Edit/Write tool_use records from the transcript at
 # transcript_path (issue #9); the payload carries no tool calls.
 EDIT_TRANSCRIPT="$TMP/edit.jsonl"

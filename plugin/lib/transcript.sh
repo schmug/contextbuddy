@@ -4,7 +4,7 @@
 # Per SPEC.md §7 the grader receives:
 #   1. session.md content (or "session.md not found" sentinel)
 #   2. latest prompt (pre-phase) or latest turn including agent response (post)
-#   3. last 3 turns verbatim
+#   3. last N typed prompts (N = [grader] sliding_window_turns, default 3)
 #   4. prior rolling summary from history.jsonl tail
 #   5. tokens_used / tokens_limit
 #   6. files edited in last 5 turns (post-phase, for loop pre-detection)
@@ -18,8 +18,10 @@
 # tokens_used 0, and edits.jsonl never named a file (no loop detection).
 #
 # transcript_window applies the same record filters as grader/jev.mjs
-# parseTranscript (and grader/jev_shadow.py), so the anthropic, ollama and
-# openai_compatible backends grade the window the typesafe backend grades.
+# parseTranscript (and grader/jev_shadow.py), and the hooks size it with the
+# [grader] sliding_window_turns key lib/job.sh hands the typesafe job (default 3),
+# so the anthropic, ollama and openai_compatible backends grade the window the
+# typesafe backend grades.
 # Tests/plugin/test_jev_grader.mjs pins the node side and
 # Tests/plugin/test_transcript_window.sh the bash side, on the same fixture
 # (Tests/plugin/fixtures/transcript_window.jsonl). Change the filters in both
@@ -174,10 +176,12 @@ transcript_window() {
 }
 
 # Accessors over a transcript_window result, for the hooks' input bundle.
-# prompts_from_window <window_json>       -> JSON array (the "last 3 turns" section)
+# prompts_from_window <window_json>       -> JSON array (the "last N turns" section)
 # tokens_from_window <window_json>        -> "<tokens_used> <tokens_limit>"
 # edited_files_from_window <window_json>  -> JSON array
-# tokens_limit is the 200000 lib/job.sh also hardcodes for the typesafe job.
+# tokens_limit is the 200000 lib/job.sh also hardcodes for the typesafe job. A model
+# with a larger context window yields tokens_used above it; tokens_trust below is how
+# the hooks decide whether the pair may replace the grader's fields.
 prompts_from_window() {
   printf '%s' "$1" | jq -c '.prompts // []' 2>/dev/null || printf '[]'
 }
@@ -190,6 +194,23 @@ tokens_from_window() {
 
 edited_files_from_window() {
   printf '%s' "$1" | jq -c '.edited_files // []' 2>/dev/null || printf '[]'
+}
+
+# tokens_trust <tokens_used> <tokens_limit>
+# Prints "ok" when 0 < used <= limit, "over" when used > limit, nothing when there is
+# no count yet (0) or either value is not a decimal integer. The hooks stamp the pair
+# over the grader's tokens_used/tokens_limit only on "ok". On "over" the limit is
+# unknown for this model (a per-model limit is a separate issue), not the context
+# full: the grader's fields stand and no context_pressure is derived from the
+# transcript, which would otherwise fire on every turn (697327 * 100 / 200000 = 348).
+# Digits-only guard first: both values are strings from jq over untrusted input,
+# never handed to [ -gt ] unchecked.
+tokens_trust() {
+  local used="$1" limit="$2"
+  case "$used" in ''|*[!0-9]*) return 0 ;; esac
+  case "$limit" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$used" -gt 0 ] || return 0
+  if [ "$used" -le "$limit" ]; then printf 'ok'; else printf 'over'; fi
 }
 
 # files_edited_recent <hash> <window>

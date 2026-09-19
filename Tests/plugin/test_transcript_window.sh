@@ -213,5 +213,78 @@ check "post: last 3 turns section holds this turn's prompt last" "$(section '## 
 grep -q 'loop detection' "$SESSION_DIR/suggestions.md" 2>/dev/null || grep -q 'same file edited' "$SESSION_DIR/suggestions.md" \
   && ok "post: suggestions.md notes the loop" || fail "post: suggestions.md has no loop entry"
 
+# --- 5. a transcript count above the limit: the limit is unknown, not the context full -
+# Real transcripts on a model with a context window above 200k yield tokens_used of
+# 697327 while tokens_from_window still reports the 200000 limit; stamping that pair
+# made (used * 100 / limit) = 348 > 85 rewrite every grade to context_pressure. The
+# hooks trust the count only when 0 < used <= limit; above it they warn once, keep the
+# grader's token fields and derive no context_pressure from the transcript.
+OVER_T="$TMP/over.jsonl"
+{
+  printf '{"type":"user","message":{"content":"a prompt on a big-context model"}}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":27327,"cache_read_input_tokens":670000,"cache_creation_input_tokens":0}}}\n'
+} > "$OVER_T"
+OVER_WARN="^contextbuddy: tokens_used 697327 exceeds tokens_limit 200000; limit unknown for this model, leaving the grader's token fields\$"
+
+stage_grade pre 1000
+rc="$(run_hook "$PRE_HOOK" "$(payload UserPromptSubmit "$OVER_T" '{"prompt":"hello"}')")"
+[ "$rc" = "0" ] && ok "pre over-limit: hook exits 0" || fail "pre over-limit: exit $rc ($(cat "$TMP/hook.err"))"
+[ "$(last_field tokens_used)" = "1000" ] \
+  && ok "pre over-limit: written grade keeps the grader's tokens_used 1000" \
+  || fail "pre over-limit: tokens_used $(last_field tokens_used)"
+[ "$(last_field tokens_limit)" = "200000" ] \
+  && ok "pre over-limit: written grade keeps the grader's tokens_limit" \
+  || fail "pre over-limit: tokens_limit $(last_field tokens_limit)"
+[ "$(last_field dominant_signal)" = "null" ] \
+  && ok "pre over-limit: dominant_signal is not context_pressure" \
+  || fail "pre over-limit: dominant_signal '$(last_field dominant_signal)'"
+grep -q "$OVER_WARN" "$TMP/hook.err" \
+  && ok "pre over-limit: one contextbuddy: warning names used and limit" \
+  || fail "pre over-limit: warning missing or misworded ($(cat "$TMP/hook.err"))"
+[ "$(grep -c '^contextbuddy: ' "$TMP/hook.err")" = "1" ] \
+  && ok "pre over-limit: exactly one stderr line" \
+  || fail "pre over-limit: $(grep -c '^contextbuddy: ' "$TMP/hook.err") stderr lines"
+
+# The production path: the anthropic grader copies "## tokens" from the bundle, so its own
+# fields already carry 697327/200000. The override must not fire from that copy either.
+stage_grade post 697327
+rc="$(run_hook "$POST_HOOK" "$(payload Stop "$OVER_T" '{"stop_reason":"end_turn","last_assistant_message":"ok"}')")"
+[ "$rc" = "0" ] && ok "post over-limit: hook exits 0" || fail "post over-limit: exit $rc ($(cat "$TMP/hook.err"))"
+[ "$(last_field dominant_signal)" = "null" ] \
+  && ok "post over-limit: grader copy of the over-limit count derives no context_pressure" \
+  || fail "post over-limit: dominant_signal '$(last_field dominant_signal)'"
+[ "$(last_field tokens_used)" = "697327" ] \
+  && ok "post over-limit: the grader's token fields stand" \
+  || fail "post over-limit: tokens_used $(last_field tokens_used)"
+grep -q "$OVER_WARN" "$TMP/hook.err" && ok "post over-limit: warning on stderr" || fail "post over-limit: no warning ($(cat "$TMP/hook.err"))"
+grep -q 'context pressure exceeded' "$SESSION_DIR/suggestions.md" 2>/dev/null \
+  && fail "post over-limit: suggestions.md gained a context pressure block" \
+  || ok "post over-limit: no context pressure block appended to suggestions.md"
+
+# --- 6. the window size is [grader] sliding_window_turns, the key the typesafe job reads --
+CONFIG_TOML="$HOME/.claude/inspector/config.toml"
+LAST_FOUR='["Update the auth middleware to read the Authorization header","Now migrate the login route","Run the auth tests","still failing. the expired-token test in tests/auth/jwt.test.ts is red again, fix it"]'
+mkdir -p "$(dirname "$CONFIG_TOML")"
+printf '[grader]\nsliding_window_turns = 4\n' > "$CONFIG_TOML"
+
+stage_grade pre 1000
+rc="$(run_hook "$PRE_HOOK" "$(payload UserPromptSubmit "$FIXTURE" '{"prompt":"a prompt the transcript does not hold yet"}')")"
+[ "$rc" = "0" ] && ok "pre window 4: hook exits 0" || fail "pre window 4: exit $rc ($(cat "$TMP/hook.err"))"
+grep -q '^## last 4 turns' "$INPUT_COPY" && ok "pre window 4: bundle heading is '## last 4 turns'" || fail "pre window 4: heading missing ($(grep '^## last' "$INPUT_COPY"))"
+check "pre window 4: bundle carries the last four typed prompts" "$(section '## last 4 turns')" ". == $LAST_FOUR"
+
+stage_grade post 1000
+rc="$(run_hook "$POST_HOOK" "$(payload Stop "$FIXTURE" '{"stop_reason":"end_turn","last_assistant_message":"ok"}')")"
+[ "$rc" = "0" ] && ok "post window 4: hook exits 0" || fail "post window 4: exit $rc ($(cat "$TMP/hook.err"))"
+grep -q '^## last 4 turns' "$INPUT_COPY" && ok "post window 4: bundle heading is '## last 4 turns'" || fail "post window 4: heading missing"
+check "post window 4: bundle carries the last four typed prompts" "$(section '## last 4 turns')" ". == $LAST_FOUR"
+
+rm -f "$CONFIG_TOML"
+stage_grade pre 1000
+rc="$(run_hook "$PRE_HOOK" "$(payload UserPromptSubmit "$FIXTURE" '{"prompt":"a prompt the transcript does not hold yet"}')")"
+[ "$rc" = "0" ] && ok "pre default window: hook exits 0" || fail "pre default window: exit $rc"
+grep -q '^## last 3 turns' "$INPUT_COPY" && ok "pre default window: heading is '## last 3 turns' without config" || fail "pre default window: heading ($(grep '^## last' "$INPUT_COPY"))"
+check "pre default window: bundle carries three prompts" "$(section '## last 3 turns')" ". == $LAST_THREE"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
