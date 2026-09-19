@@ -166,9 +166,9 @@ json_escape_string() {
 # (sha256(path)[:12]), so without this file nothing can recover the path.
 #
 # <project_path> MUST be byte-identical to the string passed to project_hash, or
-# the recorded path and the directory name would name different projects. When
-# issue #4 canonicalizes the hash input, the canonical string is what arrives
-# here — do not normalize a second time in this function.
+# the recorded path and the directory name would name different projects. The
+# hooks pass the canonical (symlink-resolved) path, the same string project_hash
+# hashes (issue #4) — do not normalize a second time in this function.
 #
 # Rewritten on every turn, not just the first: that is what lets session dirs
 # created before this file existed self-heal on their next graded turn.

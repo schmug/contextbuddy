@@ -44,6 +44,13 @@ final class SchemaTests: XCTestCase {
 
         XCTAssertEqual(grade.phase, .post)
         XCTAssertEqual(grade.dominantSignal, .loop, "plugin-set sentinel must decode")
+        // SPEC §8.3 worked example 3: atomicity is scored on the action's boundary,
+        // not on the retry count (repeats are loop detection's job, §5.4). Pins the
+        // fixture so a drift back to the retry-penalised 6 fails here.
+        XCTAssertEqual(grade.scores.atomicity.value, 9, "example 3 atomicity per the §6 rubric")
+        XCTAssertEqual(grade.scores.confidence.value, 7)
+        XCTAssertEqual(grade.scores.drift.value, 2)
+        XCTAssertEqual(grade.scores.pollution.value, 5)
 
         let reEncoded = try GradeCoding.encoder.encode(grade)
         let reEncodedString = String(data: reEncoded, encoding: .utf8)!

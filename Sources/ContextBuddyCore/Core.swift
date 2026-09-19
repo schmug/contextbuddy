@@ -18,6 +18,13 @@ public actor BuddyCore {
         // session dir's meta.json (§4.9). nil for sessions graded before the
         // hook recorded it; the popover then falls back to the hash.
         public let projectPath: String?
+        // Name for the popover's project footer row: the enclosing repository's
+        // directory name per SessionDiscovery.projectName(forPath:), which walks
+        // the filesystem to the git root (issue #42). Stored, not computed, so
+        // BuddyCore resolves it once per session hash next to the path rather
+        // than on every access. nil whenever projectPath is nil; the popover
+        // then falls back to the hash prefix.
+        public let projectName: String?
         public let lastGrade: Grade?
         public let pinnedHash: String?
         // The popover colours each score meter by its distance from that
@@ -25,26 +32,31 @@ public actor BuddyCore {
         // reach the view. `BuddyCore.config` is private to the actor and
         // hot-reloads on mtime change; Snapshot is the only channel out.
         public let thresholds: Config.Thresholds
+        // `[ui]` takes the same route (#36): animationsEnabled is the config
+        // half of StatusItemIcon.apply's `animationsEnabled:` argument (the
+        // controller ANDs it with the system Reduce Motion switch), and
+        // tokenRowPct is the popover's ⚡ row threshold. Equatable like the
+        // rest of the snapshot, so a config-only edit still reads as a change.
+        public let ui: Config.UI
 
         public init(
             state: BuddyState,
             projectHash: String?,
             projectPath: String? = nil,
+            projectName: String? = nil,
             lastGrade: Grade?,
             pinnedHash: String?,
-            thresholds: Config.Thresholds = Config.defaults.thresholds
+            thresholds: Config.Thresholds = Config.defaults.thresholds,
+            ui: Config.UI = Config.defaults.ui
         ) {
             self.state = state
             self.projectHash = projectHash
             self.projectPath = projectPath
+            self.projectName = projectName
             self.lastGrade = lastGrade
             self.pinnedHash = pinnedHash
             self.thresholds = thresholds
-        }
-
-        // Name for the popover's project footer row; nil when unknown.
-        public var projectName: String? {
-            projectPath.flatMap { SessionDiscovery.projectName(forPath: $0) }
+            self.ui = ui
         }
     }
 
@@ -66,10 +78,19 @@ public actor BuddyCore {
     private var currentHash: String?
     private var config: Config = .defaults
     private var configMTime: Date?
-    // Resolved project paths by hash. Only hits are cached, so a session dir
-    // that gains a meta.json later (the plugin rewrites it every turn) is
-    // picked up on the next snapshot instead of being negatively cached.
-    private var projectPaths: [String: String] = [:]
+    // Resolved project identity by hash: the recorded path and the display
+    // name derived from it. Only hits are cached, so a session dir that gains
+    // a meta.json later (the plugin rewrites it every turn) is picked up on
+    // the next snapshot instead of being negatively cached. The name is cached
+    // with the path because resolving it walks up the filesystem to the git
+    // root (issue #42), and that walk must not run on every snapshot. A repo
+    // that appears around the path after the first resolve is not noticed
+    // until restart; the path is cached for the process lifetime the same way.
+    private struct ProjectIdentity {
+        let path: String
+        let name: String?
+    }
+    private var projects: [String: ProjectIdentity] = [:]
 
     private var subscriber: AsyncStream<Snapshot>.Continuation?
     private var watcherTask: Task<Void, Never>?
@@ -226,15 +247,27 @@ public actor BuddyCore {
         broadcast()
     }
 
-    private func runSleepTick() {
+    // Internal rather than private: CoreTests drives the tick directly, since
+    // the 30 s timer is not something a test waits out.
+    func runSleepTick() {
+        // reloadConfigIfChanged() otherwise runs on the watcher path only, so a
+        // config edit with no grade in flight would sit unread until the next
+        // grade. Checking here bounds that delay to one tick, and a changed
+        // config broadcasts on its own: the icon and popover read `[ui]` from
+        // the snapshot and nothing else re-renders them (#36).
+        let configChanged = reloadConfigIfChanged()
         let hash = currentHash ?? ""
         let history = histories[hash] ?? .empty
         let result = StateMachine.tick(prev: state, history: history, now: Date())
+        var stateChanged = false
         if result.state != state, state != .heart, state != .celebrate {
             state = result.state
+            stateChanged = true
             if let t = result.transition, !hash.isEmpty {
                 Task { try? await self.storage.recordTransition(t, projectHash: hash) }
             }
+        }
+        if stateChanged || configChanged {
             broadcast()
         }
     }
@@ -331,12 +364,18 @@ public actor BuddyCore {
         }
     }
 
-    private func reloadConfigIfChanged() {
+    // True when the file's mtime moved and the parsed config differs from the
+    // one in use, so a caller with no other reason to broadcast (the sleep
+    // tick) can push the config-only change to the subscriber. The watcher
+    // path broadcasts regardless and ignores the result.
+    @discardableResult
+    private func reloadConfigIfChanged() -> Bool {
         let attrs = try? FileManager.default.attributesOfItem(atPath: configURL.path)
         let mtime = attrs?[.modificationDate] as? Date
-        if mtime != configMTime {
-            reloadConfig()
-        }
+        guard mtime != configMTime else { return false }
+        let previous = config
+        reloadConfig()
+        return config != previous
     }
 
     private func appendFeedbackJSONL(_ event: FeedbackEvent, hash: String) async {
@@ -364,13 +403,17 @@ public actor BuddyCore {
         }
     }
 
-    private func resolveProjectPath(for hash: String) -> String? {
-        if let cached = projectPaths[hash] { return cached }
+    private func resolveProject(for hash: String) -> ProjectIdentity? {
+        if let cached = projects[hash] { return cached }
         guard let path = SessionDiscovery.projectPath(
             inSessionDirectory: sessionsRoot.appendingPathComponent(hash)
         ) else { return nil }
-        projectPaths[hash] = path
-        return path
+        let identity = ProjectIdentity(
+            path: path,
+            name: SessionDiscovery.projectName(forPath: path)
+        )
+        projects[hash] = identity
+        return identity
     }
 
     private func makeSnapshot() -> Snapshot {
@@ -378,14 +421,16 @@ public actor BuddyCore {
         // Resolved here rather than at each currentHash assignment so every
         // path that changes the current session — bootstrap, watcher event,
         // and an explicit pin — carries the project identity for free.
-        let projectPath = currentHash.flatMap { resolveProjectPath(for: $0) }
+        let project = currentHash.flatMap { resolveProject(for: $0) }
         return Snapshot(
             state: state,
             projectHash: currentHash,
-            projectPath: projectPath,
+            projectPath: project?.path,
+            projectName: project?.name,
             lastGrade: lastGrade,
             pinnedHash: pinnedHash,
-            thresholds: config.thresholds
+            thresholds: config.thresholds,
+            ui: config.ui
         )
     }
 
