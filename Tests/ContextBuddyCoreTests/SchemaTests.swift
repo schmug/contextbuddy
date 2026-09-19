@@ -87,6 +87,47 @@ final class SchemaTests: XCTestCase {
         XCTAssertNoThrow(try GradeCoding.decoder.decode(Grade.self, from: json))
     }
 
+    // Issue #47: the hooks record the session model and where tokens_limit came from.
+    // Both are optional and additive; grades written before #47 carry neither.
+    func testModelAndLimitSourceDecodeWhenPresent() throws {
+        let json = """
+        {
+          "schema_version": 1,
+          "phase": "pre",
+          "turn": 1,
+          "timestamp": "2026-09-19T00:00:00Z",
+          "scores": {
+            "confidence": {"value": 5, "rationale": "x"},
+            "atomicity": {"value": 5, "rationale": "x"},
+            "drift": {"value": 5, "rationale": "x"},
+            "pollution": {"value": 5, "rationale": "x"}
+          },
+          "tokens_used": 176474,
+          "tokens_limit": 1000000,
+          "model": "claude-fable-5-1",
+          "limit_source": "model",
+          "dominant_signal": null,
+          "summary_update": "x"
+        }
+        """.data(using: .utf8)!
+        let grade = try GradeCoding.decoder.decode(Grade.self, from: json)
+        XCTAssertEqual(grade.model, "claude-fable-5-1")
+        XCTAssertEqual(grade.limitSource, "model")
+        XCTAssertEqual(grade.tokensLimit, 1_000_000)
+        let roundTrip = try GradeCoding.decoder.decode(Grade.self, from: GradeCoding.encoder.encode(grade))
+        XCTAssertEqual(roundTrip.model, "claude-fable-5-1")
+        XCTAssertEqual(roundTrip.limitSource, "model")
+    }
+
+    func testModelAndLimitSourceAreNilForOlderGrades() throws {
+        let grade = sampleGrade(phase: .pre, pollutionRationale: "x")
+        XCTAssertNil(grade.model)
+        XCTAssertNil(grade.limitSource)
+        let encoded = String(decoding: try GradeCoding.encoder.encode(grade), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("\"model\""), "nil optionals must be omitted, not written as null")
+        XCTAssertFalse(encoded.contains("limit_source"))
+    }
+
     func testFutureSchemaVersionDecodesSoCallersCanWarn() throws {
         // Per §13: buddy reads and warns (does not error) on unknown versions.
         let json = """

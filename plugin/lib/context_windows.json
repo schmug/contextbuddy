@@ -1,0 +1,18 @@
+{
+  "default": 200000,
+  "tiers": [200000, 1000000],
+  "disable_1m_env": "CLAUDE_CODE_DISABLE_1M_CONTEXT",
+  "prefixes": [
+    {"prefix": "claude-fable-", "window": 1000000},
+    {"prefix": "claude-mythos-", "window": 1000000},
+    {"prefix": "claude-sonnet-5", "window": 1000000},
+    {"prefix": "claude-opus-5", "window": 1000000},
+    {"prefix": "claude-opus-4-8", "window": 1000000},
+    {"prefix": "claude-opus-4-7", "window": 1000000},
+    {"prefix": "claude-haiku-", "window": 200000},
+    {"prefix": "claude-sonnet-4-6", "window": 200000},
+    {"prefix": "claude-opus-4-6", "window": 200000},
+    {"prefix": "claude-sonnet-4-5", "window": 200000},
+    {"prefix": "claude-opus-4-5", "window": 200000}
+  ]
+}
