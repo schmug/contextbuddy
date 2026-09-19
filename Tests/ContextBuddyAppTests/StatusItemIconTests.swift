@@ -5,11 +5,16 @@ import ContextBuddyCore
 
 // Coverage for the §9.1 icon contract (SPEC.md §9.1).
 //
-// The regression this guards (#34): NSButton only recolors a *template* image
-// with `contentTintColor`. When the status item's image was marked
+// The regression this guards (#34): NSImageView (like the NSButton that drew
+// the icon before #35) only recolors a *template* image with
+// `contentTintColor`. When the status item's image was marked
 // `isTemplate = false`, every per-state tint in IconStyle was discarded — four
 // of the seven states drew pure black, invisible on a dark menu bar, and the
 // rest drew SF Symbols' multicolor variants instead of §9.1's colors.
+//
+// The §9.2 motion section asserts on StatusItemIcon.Motion, the record the
+// hosted image view keeps of the effects it started: NSImageView exposes no
+// list of running symbol effects, and what plays on screen is a human check.
 //
 // Two kinds of assertion here, deliberately kept apart:
 //
@@ -166,9 +171,112 @@ final class StatusItemIconTests: XCTestCase {
         for state in BuddyState.allCases {
             let button = makeButton(appearance: .darkAqua)
             StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
-            XCTAssertEqual(button.image?.accessibilityDescription, state.rawValue)
+            XCTAssertEqual(button.accessibilityLabel(), state.rawValue)
+            XCTAssertEqual(StatusItemIcon.imageView(in: button)?.image?.accessibilityDescription, state.rawValue)
             XCTAssertEqual(button.toolTip, "ContextBuddy: \(state.rawValue)")
         }
+    }
+
+    // MARK: - §9.2 motion
+
+    // A one-shot plays on the transition into its state, once, and each of the
+    // three one-shot states plays its own §9.1 effect. None of them is held.
+    func testOneShotEffectsPlayOncePerTransitionIntoTheState() {
+        let button = makeButton(appearance: .darkAqua)
+        let expected: [(BuddyState, IconStyle.Animation)] = [
+            (.attention, .scalePulseOnce), (.celebrate, .bounceOnce), (.heart, .pulseOnce)
+        ]
+        StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+        for (index, entry) in expected.enumerated() {
+            let (state, animation) = entry
+            StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
+            let recorded = motion(of: button)
+            XCTAssertEqual(recorded.oneShotsStarted, index + 1, state.rawValue)
+            XCTAssertEqual(recorded.lastOneShot, animation, state.rawValue)
+            XCTAssertNil(recorded.held, "\(state.rawValue) is a one-shot, not a held effect")
+        }
+    }
+
+    // The rule from #35: MenubarController.renderIcon() runs on every published
+    // snapshot, and a snapshot that repeats the state must not replay the
+    // one-shot. Leaving and re-entering the state is a transition again.
+    func testARepeatedSnapshotDoesNotReplayTheOneShot() {
+        let button = makeButton(appearance: .darkAqua)
+        StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+        StatusItemIcon.apply(state: .attention, animationsEnabled: true, to: button)
+        StatusItemIcon.apply(state: .attention, animationsEnabled: true, to: button)
+        StatusItemIcon.apply(state: .attention, animationsEnabled: true, to: button)
+        XCTAssertEqual(motion(of: button).oneShotsStarted, 1, "three attention snapshots, one pulse")
+
+        StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+        StatusItemIcon.apply(state: .attention, animationsEnabled: true, to: button)
+        XCTAssertEqual(motion(of: button).oneShotsStarted, 2, "re-entering attention is a transition")
+    }
+
+    // busy rotates and dizzy wiggles for as long as the state lasts: started on
+    // entry, left running by a repeated snapshot, removed on exit. Neither
+    // counts as a one-shot.
+    func testHeldEffectsRunWhileTheStateLastsAndStopWhenItEnds() {
+        let held: [(BuddyState, IconStyle.Animation)] = [(.busy, .rotateRepeating), (.dizzy, .wiggleRepeating)]
+        for entry in held {
+            let (state, animation) = entry
+            let button = makeButton(appearance: .darkAqua)
+            StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+            StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
+            XCTAssertEqual(motion(of: button).held, animation, state.rawValue)
+            StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
+            XCTAssertEqual(motion(of: button).held, animation, "\(state.rawValue): a repeated snapshot keeps it running")
+            StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+            XCTAssertNil(motion(of: button).held, "\(state.rawValue) -> idle stops it")
+            XCTAssertEqual(motion(of: button).oneShotsStarted, 0, "\(state.rawValue) is held, not one-shot")
+        }
+    }
+
+    // §9.2: routine transitions are silent. sleep, idle and busy start no
+    // one-shot in either direction; busy's rotation is held motion (above).
+    func testRoutineTransitionsStartNoOneShot() {
+        let button = makeButton(appearance: .darkAqua)
+        for state in [BuddyState.sleep, .idle, .busy, .idle, .busy, .sleep] {
+            StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
+        }
+        XCTAssertEqual(motion(of: button).oneShotsStarted, 0)
+        XCTAssertNil(motion(of: button).lastOneShot)
+    }
+
+    // `[ui].animations_enabled = false` keeps the glyph and tint and starts no
+    // effect, held or one-shot, through every transition.
+    func testAnimationsDisabledStartsNoMotion() {
+        let button = makeButton(appearance: .darkAqua)
+        for state in BuddyState.allCases {
+            StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
+            XCTAssertEqual(motion(of: button), StatusItemIcon.Motion(), state.rawValue)
+        }
+    }
+
+    // The once-per-transition rule depends on one image view remembering the
+    // previous state across calls. A second `apply` must reuse the view it
+    // installed, not stack another one on the button.
+    func testApplyInstallsOneImageViewAndReusesIt() {
+        let button = makeButton(appearance: .darkAqua)
+        StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+        let first = StatusItemIcon.imageView(in: button)
+        StatusItemIcon.apply(state: .busy, animationsEnabled: true, to: button)
+        XCTAssertNotNil(first)
+        XCTAssertTrue(first === StatusItemIcon.imageView(in: button))
+        XCTAssertEqual(button.subviews.count, 1)
+        XCTAssertEqual(first?.state, .busy)
+    }
+
+    // Clicks must reach the status item's button: the popover and the menu are
+    // its target/action (MenubarController.handleClick), and a subview that
+    // took hit-testing would swallow them.
+    func testTheImageViewStaysOutOfHitTesting() {
+        let button = makeButton(appearance: .darkAqua)
+        StatusItemIcon.apply(state: .idle, animationsEnabled: true, to: button)
+        let container = NSView(frame: button.frame)
+        container.addSubview(button)
+        let centre = NSPoint(x: button.frame.midX, y: button.frame.midY)
+        XCTAssertTrue(container.hitTest(centre) === button)
     }
 }
 
@@ -242,7 +350,7 @@ extension StatusItemIconTests {
     ) -> Colorimetry.Measurement {
         let button = makeButton(appearance: appearance)
         StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
-        if let overrideTint { button.contentTintColor = overrideTint }
+        if let overrideTint { StatusItemIcon.imageView(in: button)?.contentTintColor = overrideTint }
 
         let pixels = Self.buttonPoints * Self.renderScale
         guard let rep = NSBitmapImageRep(
@@ -282,6 +390,15 @@ extension StatusItemIconTests {
             background: background,
             inkCoverage: weight / Double(rep.pixelsWide * rep.pixelsHigh)
         )
+    }
+
+    // The motion record of the image view `apply` installed in `button`.
+    func motion(of button: NSButton, file: StaticString = #filePath, line: UInt = #line) -> StatusItemIcon.Motion {
+        guard let view = StatusItemIcon.imageView(in: button) else {
+            XCTFail("apply installed no StatusIconImageView", file: file, line: line)
+            return StatusItemIcon.Motion(held: nil, oneShotsStarted: -1, lastOneShot: nil)
+        }
+        return view.motion
     }
 
     // Resolves a dynamic NSColor under `appearance` and returns its hue.

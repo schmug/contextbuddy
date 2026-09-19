@@ -30,7 +30,10 @@ final class MenubarController: NSObject, NSMenuDelegate {
     private init(core: BuddyCore, inspectorRoot: URL) {
         self.core = core
         self.inspectorRoot = inspectorRoot
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        // Fixed width: the button draws no image of its own (the glyph is the
+        // image view StatusItemIcon.apply hosts in it), so variableLength
+        // would collapse the item. See StatusItemIcon.length.
+        self.statusItem = NSStatusBar.system.statusItem(withLength: StatusItemIcon.length)
         self.popover = NSPopover()
 
         super.init()

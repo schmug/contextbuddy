@@ -674,6 +674,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 - **Routine transitions** (idle ↔ busy) are silent and instantaneous. No motion.
 - **Attention/celebrate/dizzy/heart** transitions are animated. Animation is the attention signal.
 - All animations under 800ms total wall-clock unless the state itself is held (dizzy wiggles continuously while in state; celebrate plays once and ends).
+- The status item is an AppKit `NSStatusItem`, so the effects in §9.1 run as the same SF Symbol effects through `NSImageView.addSymbolEffect` (`.bounce`, `.wiggle`, `.pulse`, `.rotate`) on an image view hosted in the item's button. A one-shot plays once per transition into its state; a snapshot that repeats the state does not replay it.
 
 ### 9.3 Popover
 
