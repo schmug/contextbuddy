@@ -78,6 +78,24 @@ final class SignalsTests: XCTestCase {
         XCTAssertFalse(all.contains { $0.probability == 0 }, "a 0% intent is noise in a 320pt popover")
     }
 
+    func testTopIntentsWithNonPositiveLimitReturnsEmpty() throws {
+        // The ranked list is truncated with removeSubrange(limit...), which
+        // traps on a negative bound.
+        let grade = try GradeCoding.decoder.decode(Grade.self, from: try fixtureData("grade_with_signals"))
+        let intent = try XCTUnwrap(grade.signals?.intent)
+
+        XCTAssertEqual(intent.topIntents(limit: 0), [])
+        XCTAssertEqual(intent.topIntents(limit: -1), [])
+    }
+
+    func testTopIntentsBelowLimitReturnsAllNonZero() throws {
+        let grade = try GradeCoding.decoder.decode(Grade.self, from: try fixtureData("grade_with_signals"))
+        let intent = try XCTUnwrap(grade.signals?.intent)
+
+        // Six of the nine intents carry a non-zero probability.
+        XCTAssertEqual(intent.topIntents(limit: 99).count, 6)
+    }
+
     // MARK: - Backward compatibility
 
     func testGradeWithoutSignalsStillDecodes() throws {

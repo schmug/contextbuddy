@@ -110,18 +110,30 @@ public struct Signals: Codable, Equatable, Sendable {
         // Highest-probability intents first, zero-probability entries dropped
         // (a 0% row is noise in a 320pt popover). Ties break on label so the
         // popover does not reshuffle between identical grades.
+        // Written as explicit statements rather than one chained expression:
+        // the chained form (filter -> map -> sorted-with-ternary -> prefix ->
+        // map) exceeded the Swift type-checker's time budget on the CI runner
+        // and failed to build there while compiling locally, since that budget
+        // is wall-clock and so machine-speed dependent.
         public func topIntents(limit: Int) -> [IntentProbability] {
-            guard let probabilities else { return [] }
-            return probabilities
-                .filter { $0.value > 0 }
-                .map { IntentProbability(label: Intent.humanize($0.key), probability: $0.value) }
-                .sorted { lhs, rhs in
-                    lhs.probability == rhs.probability
-                        ? lhs.label < rhs.label
-                        : lhs.probability > rhs.probability
+            guard limit > 0, let probabilities else { return [] }
+
+            var ranked: [IntentProbability] = []
+            for (key, value) in probabilities where value > 0 {
+                ranked.append(IntentProbability(label: Intent.humanize(key), probability: value))
+            }
+
+            ranked.sort { (lhs: IntentProbability, rhs: IntentProbability) -> Bool in
+                if lhs.probability != rhs.probability {
+                    return lhs.probability > rhs.probability
                 }
-                .prefix(limit)
-                .map { $0 }
+                return lhs.label < rhs.label
+            }
+
+            if ranked.count > limit {
+                ranked.removeSubrange(limit...)
+            }
+            return ranked
         }
 
         // The humanized form of `choice`, for display next to topIntents.
