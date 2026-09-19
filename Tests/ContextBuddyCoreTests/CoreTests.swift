@@ -55,6 +55,67 @@ final class CoreTests: XCTestCase {
                        "unset keys keep their compiled-in default")
     }
 
+    // `[ui]` takes the same route as the thresholds (#36): the controller's
+    // icon and popover read it from Snapshot, so both keys have to survive
+    // the trip from config.toml through the actor.
+    func testSnapshotCarriesUIFromConfigFile() async throws {
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let unconfigured = await core.currentSnapshot()
+        XCTAssertEqual(unconfigured.ui, Config.defaults.ui, "no file: compiled-in defaults")
+
+        try writeConfig("""
+        [ui]
+        animations_enabled = false
+        token_row_pct = 10
+        """)
+        let configured = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await configured.currentSnapshot()
+        XCTAssertFalse(snap.ui.animationsEnabled)
+        XCTAssertEqual(snap.ui.tokenRowPct, 10)
+    }
+
+    // Acceptance for #36's "without restarting the app". reloadConfigIfChanged()
+    // used to run on the watcher path only, so a `[ui]` edit with no grade in
+    // flight sat unread indefinitely. The tick now checks the file too, and a
+    // config-only change (state stays .sleep throughout) still reaches the
+    // subscriber: the popover and icon re-render on snapshots, nothing else.
+    func testSleepTickPicksUpAConfigEditAndBroadcastsIt() async throws {
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let stream = await core.subscribe()
+        let bootstrap = await core.currentSnapshot()
+        XCTAssertTrue(bootstrap.ui.animationsEnabled, "defaults until the file exists")
+
+        try writeConfig("""
+        [ui]
+        animations_enabled = false
+        token_row_pct = 10
+        """, mtimeAge: 200)
+        await core.runSleepTick()
+        // firstSnapshot, not nextSnapshot: its timeout is real, so a tick that
+        // never broadcasts fails here instead of hanging the suite. The
+        // bootstrap snapshot the stream opened with still carries the
+        // defaults and is skipped by the predicate.
+        let disabled = try await firstSnapshot(
+            matching: { !$0.ui.animationsEnabled }, from: stream, within: 1.0
+        )
+        XCTAssertEqual(disabled.ui.tokenRowPct, 10, "the tick reloaded the edited file")
+        XCTAssertEqual(disabled.state, .sleep, "a config-only change broadcasts without a state change")
+
+        // Setting it back restores motion. A distinct mtime is what the reload
+        // keys on, so the second edit is dated apart from the first. Read
+        // through currentSnapshot(): firstSnapshot's timeout cancels the
+        // stream, and re-subscribing races the actor's onTermination cleanup.
+        try writeConfig("""
+        [ui]
+        animations_enabled = true
+        """, mtimeAge: 100)
+        await core.runSleepTick()
+        let restored = await core.currentSnapshot()
+        XCTAssertTrue(restored.ui.animationsEnabled)
+        XCTAssertEqual(restored.ui.tokenRowPct, Config.defaults.ui.tokenRowPct,
+                       "a key dropped from the file falls back to its default, not the previous value")
+    }
+
     func testBootstrapFromExistingLastJsonFromDisk() async throws {
         let hash = "aaaaaaaaaaaa"
         try writeFixtureGrade(hash: hash, fixture: "example2_post_turn22")
@@ -203,6 +264,21 @@ final class CoreTests: XCTestCase {
     }
 
     // MARK: helpers
+
+    // Writes config.toml under the temp root. `mtimeAge` dates the file that
+    // many seconds in the past: BuddyCore.reloadConfigIfChanged keys on the
+    // mtime, and two writes within one test can otherwise land too close
+    // together to read as a change.
+    private func writeConfig(_ toml: String, mtimeAge: TimeInterval? = nil) throws {
+        let url = inspectorRoot.appendingPathComponent("config.toml")
+        try toml.write(to: url, atomically: true, encoding: .utf8)
+        if let age = mtimeAge {
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(-age)],
+                ofItemAtPath: url.path
+            )
+        }
+    }
 
     private func writeMeta(hash: String, projectPath: String) throws {
         let dir = inspectorRoot.appendingPathComponent("sessions/\(hash)")

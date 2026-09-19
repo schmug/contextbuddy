@@ -249,12 +249,54 @@ final class StatusItemIconTests: XCTestCase {
     }
 
     // `animationsEnabled: false` keeps the glyph and tint and starts no effect,
-    // held or one-shot, through every transition. That is the `apply` argument,
-    // not the config key: wiring `[ui].animations_enabled` to it is #36.
+    // held or one-shot, through every transition. That is the `apply` argument;
+    // the config key and Reduce Motion reach it through
+    // StatusItemIcon.animationsEnabled(ui:reduceMotion:), pinned below (#36).
     func testAnimationsDisabledStartsNoMotion() {
         let button = makeButton(appearance: .darkAqua)
         for state in BuddyState.allCases {
             StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
+            XCTAssertEqual(motion(of: button), StatusItemIcon.Motion(), state.rawValue)
+        }
+    }
+
+    // MARK: - #36: `[ui].animations_enabled` and Reduce Motion
+
+    // The two switches compose as AND: motion plays only when the config
+    // allows it and the system is not reducing motion. Neither overrides the
+    // other, so `animations_enabled = true` cannot re-enable motion the user
+    // turned off system-wide, and Reduce Motion off cannot re-enable motion
+    // the config turned off.
+    func testMotionPlaysOnlyWhenConfigAllowsAndTheSystemIsNotReducingIt() {
+        let table: [(config: Bool, reduceMotion: Bool, expected: Bool)] = [
+            (true, false, true),
+            (true, true, false),
+            (false, false, false),
+            (false, true, false),
+        ]
+        for row in table {
+            let ui = Config.UI(animationsEnabled: row.config, tokenRowPct: 70)
+            XCTAssertEqual(
+                StatusItemIcon.animationsEnabled(ui: ui, reduceMotion: row.reduceMotion),
+                row.expected,
+                "animations_enabled=\(row.config), reduceMotion=\(row.reduceMotion)"
+            )
+        }
+    }
+
+    // #36's acceptance: `animations_enabled = true` plus Reduce Motion on is
+    // `.none` for every state, and through `apply` that means no effect is
+    // started, held or one-shot, across every transition.
+    func testReduceMotionSuppressesEveryStateEvenWhenConfigAllowsMotion() {
+        let ui = Config.UI(animationsEnabled: true, tokenRowPct: 70)
+        let enabled = StatusItemIcon.animationsEnabled(ui: ui, reduceMotion: true)
+        let button = makeButton(appearance: .darkAqua)
+        for state in BuddyState.allCases {
+            XCTAssertEqual(
+                IconStyle.style(for: state, animationsEnabled: enabled).animation, .none,
+                "\(state.rawValue) must not animate under Reduce Motion"
+            )
+            StatusItemIcon.apply(state: state, animationsEnabled: enabled, to: button)
             XCTAssertEqual(motion(of: button), StatusItemIcon.Motion(), state.rawValue)
         }
     }
