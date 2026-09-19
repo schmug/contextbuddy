@@ -41,7 +41,9 @@ claude plugin marketplace add /path/to/contextbuddy   # or: schmug/contextbuddy
 claude plugin install contextbuddy@contextbuddy
 ```
 
-A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way.
+A local path lets you iterate without pushing; `claude plugin marketplace update contextbuddy` picks up new commits either way. The installed copy is cached by the version in `plugin/.claude-plugin/plugin.json`, so after new commits reinstall it (`claude plugin uninstall contextbuddy@contextbuddy && claude plugin install contextbuddy@contextbuddy`); `claude plugin update` reports up to date and changes nothing.
+
+Working on the plugin or the app? [CLAUDE.md](CLAUDE.md) holds the repo's working agreements for agents, including the live hook run every plugin PR must show.
 
 To verify the plugin manifest:
 
