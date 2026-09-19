@@ -181,6 +181,19 @@ if command -v jq >/dev/null 2>&1; then
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
+  # dominant_signal is model output. SPEC §4.1 allows exactly four dimension names plus the
+  # two mechanical sentinels or null; anything else is cleared here so a prompt-injected
+  # grader cannot steer the suggestions lookup below (the string used to be spliced into a
+  # jq program, which turned it into code).
+  DOM_RAW="$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')"
+  case "$DOM_RAW" in
+    ''|confidence|atomicity|drift|pollution|loop|context_pressure) ;;
+    *)
+      log_err "dominant_signal not one of the allowed values; cleared"
+      GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = null')"
+      ;;
+  esac
+
   # Context window per session model (issue #47). The backend's tokens_limit is replaced
   # by the resolved one (override > autocompact > model table > default), the evidence
   # floor is re-applied against the tokens_used the grader reported so no grade ever
@@ -218,7 +231,7 @@ if command -v jq >/dev/null 2>&1; then
     {
       printf '\n## Turn %s — %s — %s\n\n' "$TURN" "$TIMESTAMP" "$DOMINANT"
       printf '**Phase**: pre\n\n'
-      RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r ".scores.${DOMINANT}.rationale // .summary_update")"
+      RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r --arg d "$DOMINANT" '.scores[$d].rationale // .summary_update')"
       printf '**Issue**: %s\n\n' "$RATIONALE"
       printf 'Status: open\n'
     } >> "$SUGG_PATH"
