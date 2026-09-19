@@ -3,7 +3,8 @@
 #
 # Same pipeline as user_prompt_submit.sh but with phase=post and the
 # additional responsibilities listed in §10.1:
-#   - parse hook input for tool calls, append to edits.jsonl
+#   - read this turn's Edit/Write tool_use records from the JSONL transcript at
+#     hook.transcript_path (the payload carries no tool calls), append to edits.jsonl
 #   - run loop detection per §5.4
 #   - override dominant_signal to "loop" if triggered
 
@@ -70,14 +71,26 @@ GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 
+# This turn's window, token count and edited files come from the JSONL transcript at
+# hook.transcript_path; the payload carries none of them (issue #9, lib/transcript.sh).
+# The window is the [grader] sliding_window_turns the typesafe job also reads
+# (lib/job.sh), default 3. On post the window keeps this turn's prompt last. A missing
+# or unreadable transcript is an empty window plus a stderr warning, never a skip.
+WINDOW_TURNS="$(toml_get_section_int "$CONFIG_PATH" "grader" "sliding_window_turns" 3)"
+TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
+WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" "$WINDOW_TURNS")"
+TOKENS_USED_TX="$(tokens_used_from_window "$WINDOW_JSON")"
+
+# Context window for this session (issue #47, lib/context_window.sh): model from the
+# transcript tail, limit from the override / auto-compact window / model table, floored
+# against the transcript count above so used <= limit always. Resolved once: the
+# "## tokens" line the LLM backends copy, the typesafe job and the grade written below
+# all carry this one pair.
+CTX="$(resolve_context_window "$TRANSCRIPT_PATH" "$TOKENS_USED_TX")"
+TOKENS_LINE="$(tokens_line_from_context "$CTX")"
+
 if command -v jq >/dev/null 2>&1; then
-  EDITED_FILES_JSON="$(printf '%s' "$HOOK_PAYLOAD" | jq -c '
-    [
-      (.tool_calls // .turn.tool_calls // [])[]?
-      | select((.name // "") | test("(Edit|Write|MultiEdit)"; "i"))
-      | (.input.file_path // .input.path // empty)
-    ] | unique
-  ' 2>/dev/null || printf '[]')"
+  EDITED_FILES_JSON="$(edited_files_from_window "$WINDOW_JSON")"
   EDIT_RECORD="$(jq -c -n --arg ts "$TIMESTAMP" --argjson turn "$TURN" --argjson files "$EDITED_FILES_JSON" \
     '{ts: $ts, turn: $turn, files: $files}')"
   printf '%s\n' "$EDIT_RECORD" >> "$EDITS_PATH"
@@ -110,9 +123,9 @@ fi
   printf '## turn\n%s\n\n' "$TURN"
   printf '## timestamp\n%s\n\n' "$TIMESTAMP"
   printf '## prior summary\n%s\n\n' "$(prior_summary "$PROJECT_HASH")"
-  printf '## tokens\n%s\n\n' "$(tokens_from_hook_payload "$HOOK_PAYLOAD")"
-  printf '## last 3 turns (from hook transcript)\n```json\n%s\n```\n\n' \
-    "$(recent_turns_from_hook_payload "$HOOK_PAYLOAD" 3)"
+  printf '## tokens\n%s\n\n' "$TOKENS_LINE"
+  printf '## last %s turns (from hook transcript)\n```json\n%s\n```\n\n' \
+    "$WINDOW_TURNS" "$(prompts_from_window "$WINDOW_JSON")"
   printf '## files edited in last 5 turns\n```json\n%s\n```\n\n' \
     "$(files_edited_recent "$PROJECT_HASH" 5)"
   printf '## completed turn\n%s\n' "$HOOK_PAYLOAD"
@@ -120,7 +133,7 @@ fi
 
 # Job file for the typesafe backend (see user_prompt_submit.sh).
 build_job "post" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
-  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" \
+  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" "$CTX" \
   > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
 
 GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
@@ -152,13 +165,42 @@ if command -v jq >/dev/null 2>&1; then
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
+  # dominant_signal is model output. SPEC §4.1 allows exactly four dimension names plus the
+  # two mechanical sentinels or null; anything else is cleared here so a prompt-injected
+  # grader cannot steer the suggestions lookup below (the string used to be spliced into a
+  # jq program, which turned it into code).
+  DOM_RAW="$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')"
+  case "$DOM_RAW" in
+    ''|confidence|atomicity|drift|pollution|loop|context_pressure) ;;
+    *)
+      log_err "dominant_signal not one of the allowed values; cleared"
+      GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = null')"
+      ;;
+  esac
+
+  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): the
+  # transcript's tokens_used and the per-model, floored tokens_limit from lib/context_window.sh
+  # (issue #47) replace the grader's four token fields in one failure-safe jq call; the
+  # grader's tokens_used stands only when the transcript has none (see
+  # user_prompt_submit.sh for the full note).
+  TOKENS_USED="$TOKENS_USED_TX"
+  [ "$TOKENS_USED" -gt 0 ] 2>/dev/null || TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
+  case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
+  CTX_MODEL="$(printf '%s' "$CTX" | jq -r '.model // empty')"
+  # shellcheck disable=SC2046  # two space-separated words by construction
+  set -- $(context_window_floor "$TOKENS_USED" "$(printf '%s' "$CTX" | jq -r '.tokens_limit')" "$(printf '%s' "$CTX" | jq -r '.limit_source')")
+  TOKENS_LIMIT="$1"; LIMIT_SOURCE="$2"
+  NEW="$(printf '%s' "$GRADE_JSON" | jq -c \
+    --argjson used "$TOKENS_USED" --argjson lim "$TOKENS_LIMIT" --arg src "$LIMIT_SOURCE" --arg model "$CTX_MODEL" \
+    '.tokens_used = $used | .tokens_limit = $lim | .limit_source = $src
+     | .model = (if $model == "" then null else $model end)' 2>/dev/null)" \
+    && [ -n "$NEW" ] && GRADE_JSON="$NEW"
+
   # Mechanically override dominant_signal: loop wins over context_pressure
   # which wins over the grader's dimension choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
   else
-    TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
-    TOKENS_LIMIT="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_limit // 200000')"
     if [ "$TOKENS_LIMIT" -gt 0 ] && \
        [ "$(( TOKENS_USED * 100 / TOKENS_LIMIT ))" -gt "$CONTEXT_PRESSURE_PCT" ]; then
       GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "context_pressure"')"
@@ -187,7 +229,7 @@ if command -v jq >/dev/null 2>&1; then
       elif [ "$DOMINANT" = "context_pressure" ]; then
         printf '**Pattern**: context pressure exceeded %s%%.\n\n' "$CONTEXT_PRESSURE_PCT"
       else
-        RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r ".scores.${DOMINANT}.rationale // .summary_update")"
+        RATIONALE="$(printf '%s' "$GRADE_JSON" | jq -r --arg d "$DOMINANT" '.scores[$d].rationale // .summary_update')"
         printf '**Issue**: %s\n\n' "$RATIONALE"
       fi
       printf 'Status: open\n'

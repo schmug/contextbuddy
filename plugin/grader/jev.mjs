@@ -20,6 +20,8 @@
 // falls with irrelevant state. So: the state carries only typed prompts and the last
 // reply, each truncated; every count (tokens, pollution) is computed here in code.
 import { readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // --- transcript --------------------------------------------------------------------------
@@ -60,18 +62,26 @@ function records(text) {
   return out
 }
 
-// parseTranscript(text, { windowTurns }) -> { prompts, firstPrompt, lastAssistantText, tokensUsed }
+// parseTranscript(text, { windowTurns }) -> { prompts, firstPrompt, lastAssistantText, tokensUsed, model }
 // `prompts` are the last `windowTurns` typed prompts, oldest first. `tokensUsed` is the
 // context size the last assistant call saw: input + cache read + cache creation, the same
-// arithmetic ContextBar uses, with no system-overhead fudge.
+// arithmetic ContextBar uses, with no system-overhead fudge. `model` is `message.model` of
+// the last assistant record (issue #47; hook payloads carry no model). Records whose model
+// is "<synthetic>" are harness placeholders (API errors, zero usage), not a reply: they
+// contribute neither text, usage nor model. Mirrored by jev_shadow.py transcript_context.
+const SYNTHETIC_MODEL = '<synthetic>'
 export function parseTranscript(text, { windowTurns = 3 } = {}) {
   const prompts = []
   let lastAssistantText = ''
   let tokensUsed = 0
+  let model = null
   for (const rec of records(text)) {
     const p = typedPromptText(rec)
     if (p !== null) { prompts.push(p); continue }
     if (rec.type === 'assistant') {
+      const m = rec.message?.model
+      if (m === SYNTHETIC_MODEL) continue
+      if (typeof m === 'string' && m) model = m
       const t = assistantText(rec)
       if (t.trim()) lastAssistantText = t
       const u = rec.message?.usage
@@ -85,7 +95,87 @@ export function parseTranscript(text, { windowTurns = 3 } = {}) {
     firstPrompt: prompts[0] || '',
     lastAssistantText,
     tokensUsed,
+    model,
   }
+}
+
+// --- context window (issue #47) ----------------------------------------------------------
+//
+// The same resolution as lib/context_window.sh, over the same prefix table
+// (lib/context_windows.json): CONTEXTBUDDY_CONTEXT_WINDOW override > Claude Code's
+// auto-compact window (CLAUDE_CODE_AUTO_COMPACT_WINDOW, else autoCompactWindow in
+// ${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json) > model table > 200000; then the evidence
+// floor: a limit below tokensUsed is raised to the next tier (past the last, to tokensUsed)
+// and limit_source becomes "observed". The hooks resolve first and pass the result in the
+// job (tokens_limit + limit_source); `resolved` takes that base so both agree, and the floor
+// is re-applied here against the transcript's tokensUsed, which the hooks do not have.
+const CONTEXT_WINDOW_FALLBACK = { default: 200000, tiers: [200000, 1000000], prefixes: [] }
+function loadContextWindows() {
+  try { return JSON.parse(readFileSync(new URL('../lib/context_windows.json', import.meta.url), 'utf8')) } catch { return CONTEXT_WINDOW_FALLBACK }
+}
+export const CONTEXT_WINDOWS = loadContextWindows()
+
+// parseTokenCount('500k' | '500000' | '1m') -> integer, or null when unparseable or zero.
+export function parseTokenCount(v) {
+  if (v === null || v === undefined) return null
+  const s = String(v).replace(/[\s_,]/g, '').toLowerCase()
+  const m = /^(\d+)([km]?)$/.exec(s)
+  if (!m) return null
+  const n = Number(m[1]) * (m[2] === 'k' ? 1000 : m[2] === 'm' ? 1000000 : 1)
+  return n > 0 ? n : null
+}
+
+export function contextWindowForModel(model, env = process.env) {
+  const t = CONTEXT_WINDOWS
+  let w = t.default
+  if (typeof model === 'string' && model) {
+    const row = (t.prefixes || []).find(r => model.startsWith(r.prefix))
+    if (row && typeof row.window === 'number') w = row.window
+  }
+  const off = env[t.disable_1m_env || 'CLAUDE_CODE_DISABLE_1M_CONTEXT']
+  if ((off === '1' || off === 'true') && w > t.default) w = t.default
+  return w
+}
+
+function autoCompactWindow(env, readFile, home) {
+  let v = env.CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  if (!v) {
+    try {
+      const settings = JSON.parse(readFile(join(env.CLAUDE_CONFIG_DIR || join(home, '.claude'), 'settings.json'), 'utf8'))
+      v = settings?.autoCompactWindow
+    } catch { v = undefined }
+  }
+  return parseTokenCount(v)
+}
+
+export function contextWindowFloor(tokensUsed, limit, source) {
+  const used = Number(tokensUsed) || 0
+  let lim = Number(limit) || 0
+  let src = source
+  if (lim <= 0) { lim = CONTEXT_WINDOWS.default; src = 'default' }
+  if (used > lim) {
+    lim = (CONTEXT_WINDOWS.tiers || []).find(t => t >= used) ?? used
+    src = 'observed'
+  }
+  return { tokens_limit: lim, limit_source: src }
+}
+
+// resolveContextWindow({ model, tokensUsed, env, readFile, home, resolved }) -> { tokens_limit, limit_source }
+export function resolveContextWindow({ model, tokensUsed = 0, env = process.env, readFile = readFileSync, home = homedir(), resolved = null } = {}) {
+  let limit, source
+  const override = parseTokenCount(env.CONTEXTBUDDY_CONTEXT_WINDOW)
+  if (resolved && typeof resolved.tokens_limit === 'number' && resolved.tokens_limit > 0 && typeof resolved.limit_source === 'string') {
+    limit = resolved.tokens_limit; source = resolved.limit_source
+  } else if (override) {
+    limit = override; source = 'override'
+  } else if ((limit = autoCompactWindow(env, readFile, home))) {
+    source = 'autocompact'
+  } else if (typeof model === 'string' && model) {
+    limit = contextWindowForModel(model, env); source = 'model'
+  } else {
+    limit = CONTEXT_WINDOWS.default; source = 'default'
+  }
+  return contextWindowFloor(tokensUsed, limit, source)
 }
 
 // --- pollution (mechanical v0) -----------------------------------------------------------
@@ -333,7 +423,7 @@ export function carryPollution(prior) {
   return { value: prior.value, rationale: fit(`(carried from turn ${prior.turn}) ${bare}`) }
 }
 
-export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokensLimit, pollution, thresholds, anchorFromPrompt, model }) {
+export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokensLimit, limitSource, sessionModel, pollution, thresholds, anchorFromPrompt, model }) {
   const a = answers
   const rat = (answer, anchored) => fit((anchorFromPrompt && anchored ? FIRST_PROMPT_PREFIX : '') + levelText(answer))
   const scores = {
@@ -376,6 +466,10 @@ export function mapAnswers({ answers, phase, turn, timestamp, tokensUsed, tokens
     scores,
     tokens_used: tokensUsed,
     tokens_limit: tokensLimit,
+    // Issue #47: the session's Claude model and where tokens_limit came from
+    // (override | autocompact | model | observed | default). Optional, additive.
+    model: typeof sessionModel === 'string' && sessionModel ? sessionModel : null,
+    limit_source: limitSource || 'default',
     dominant_signal,
     summary_update,
     signals,
@@ -459,9 +553,14 @@ export async function grade(job, { fetchImpl = globalThis.fetch, env = process.e
 
   const pollution = phase === 'pre' ? carryPollution(job.prior_pollution) : mechanicalPollution(text)
   const thresholds = { confidence_attention: 4, atomicity_attention: 4, drift_attention: 6, pollution_attention: 7, ...(job.thresholds || {}) }
+  const cw = resolveContextWindow({
+    model: window.model, tokensUsed: window.tokensUsed, env, readFile,
+    resolved: { tokens_limit: job.tokens_limit, limit_source: job.limit_source },
+  })
   const g = mapAnswers({
     answers, phase, turn: job.turn, timestamp: job.timestamp,
-    tokensUsed: window.tokensUsed, tokensLimit: job.tokens_limit || 200000,
+    tokensUsed: window.tokensUsed, tokensLimit: cw.tokens_limit, limitSource: cw.limit_source,
+    sessionModel: window.model || (typeof job.session_model === 'string' ? job.session_model : null),
     pollution, thresholds,
     anchorFromPrompt: chooseAnchor({ anchorYaml: job.session_md, firstPrompt: window.firstPrompt || prompt }).source === 'first_prompt',
     model: response.model || job.model,
