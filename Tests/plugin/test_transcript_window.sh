@@ -3,7 +3,9 @@
 # files come from the JSONL transcript at hook.transcript_path, not from hook payload
 # keys Claude Code never sends (issue #9). The record filters mirror the ones
 # Tests/plugin/test_jev_grader.mjs pins for grader/jev.mjs parseTranscript, against the
-# same fixture, so the bash and node windows cannot drift.
+# same fixture, so the bash and node windows cannot drift. tokens_limit is resolved per
+# session model by lib/context_window.sh (issue #47) fed with that count, so the fixture's
+# claude-fable-5-1 grades against 1000000 and an unknown model above 200000 is floored.
 #
 # Part 1 asserts lib/transcript.sh transcript_window directly with jq, including the
 # untrusted-path cases (missing, unreadable, option-shaped, spaces). Part 2 runs the real
@@ -176,12 +178,15 @@ grep -q 'Base directory for this skill' "$INPUT_COPY" \
 grep -q 'validateToken\|xxxxxxxxxx' "$INPUT_COPY" \
   && fail "pre fixture: tool_result content leaked into the bundle" \
   || ok "pre fixture: no tool output in the bundle"
-[ "$(section '## tokens' | tr -d '\n')" = "60200 200000" ] \
-  && ok "pre fixture: tokens section is 60200 200000" \
+[ "$(section '## tokens' | tr -d '\n')" = "60200 1000000" ] \
+  && ok "pre fixture: tokens section is 60200 1000000 (fable 5.1 window)" \
   || fail "pre fixture: tokens section is '$(section '## tokens' | tr -d '\n')'"
 [ "$(last_field tokens_used)" = "60200" ] \
   && ok "pre fixture: written grade carries tokens_used 60200 from the transcript" \
   || fail "pre fixture: written grade tokens_used is $(last_field tokens_used)"
+[ "$(last_field tokens_limit)" = "1000000" ] && [ "$(last_field limit_source)" = "model" ] && [ "$(last_field model)" = "claude-fable-5-1" ] \
+  && ok "pre fixture: tokens_limit 1000000 from the fixture's model, limit_source model" \
+  || fail "pre fixture: $(last_field tokens_limit) $(last_field limit_source) $(last_field model)"
 [ ! -s "$TMP/hook.err" ] && ok "pre fixture: nothing on stderr" || fail "pre fixture: stderr: $(cat "$TMP/hook.err")"
 
 # 4b. pre with a missing transcript: empty window, warning, grade still written
@@ -213,53 +218,71 @@ check "post: last 3 turns section holds this turn's prompt last" "$(section '## 
 grep -q 'loop detection' "$SESSION_DIR/suggestions.md" 2>/dev/null || grep -q 'same file edited' "$SESSION_DIR/suggestions.md" \
   && ok "post: suggestions.md notes the loop" || fail "post: suggestions.md has no loop entry"
 
-# --- 5. a transcript count above the limit: the limit is unknown, not the context full -
+# --- 5. a transcript count above the model's nominal window: the limit was unknown -------
 # Real transcripts on a model with a context window above 200k yield tokens_used of
-# 697327 while tokens_from_window still reports the 200000 limit; stamping that pair
-# made (used * 100 / limit) = 348 > 85 rewrite every grade to context_pressure. The
-# hooks trust the count only when 0 < used <= limit; above it they warn once, keep the
-# grader's token fields and derive no context_pressure from the transcript.
+# 697327. Against the old literal 200000 limit, (used * 100 / limit) = 348 > 85 rewrote
+# every grade to context_pressure. Now the transcript count feeds lib/context_window.sh
+# (issue #47): an unknown model resolves to the 200000 default and the evidence floor
+# raises it to the next tier, 1000000, with limit_source "observed"; context_pressure is
+# derived from the real ratio only. Same semantics as test_context_window_hooks.sh.
 OVER_T="$TMP/over.jsonl"
 {
   printf '{"type":"user","message":{"content":"a prompt on a big-context model"}}\n'
   printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":27327,"cache_read_input_tokens":670000,"cache_creation_input_tokens":0}}}\n'
 } > "$OVER_T"
-OVER_WARN="^contextbuddy: tokens_used 697327 exceeds tokens_limit 200000; limit unknown for this model, leaving the grader's token fields\$"
+PRESSURE_T="$TMP/pressure.jsonl"
+{
+  printf '{"type":"user","message":{"content":"a prompt near the top of a 1M window"}}\n'
+  printf '{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":900000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}\n'
+} > "$PRESSURE_T"
 
 stage_grade pre 1000
 rc="$(run_hook "$PRE_HOOK" "$(payload UserPromptSubmit "$OVER_T" '{"prompt":"hello"}')")"
 [ "$rc" = "0" ] && ok "pre over-limit: hook exits 0" || fail "pre over-limit: exit $rc ($(cat "$TMP/hook.err"))"
-[ "$(last_field tokens_used)" = "1000" ] \
-  && ok "pre over-limit: written grade keeps the grader's tokens_used 1000" \
+[ "$(last_field tokens_used)" = "697327" ] \
+  && ok "pre over-limit: written grade carries the transcript's tokens_used 697327" \
   || fail "pre over-limit: tokens_used $(last_field tokens_used)"
-[ "$(last_field tokens_limit)" = "200000" ] \
-  && ok "pre over-limit: written grade keeps the grader's tokens_limit" \
+[ "$(last_field tokens_limit)" = "1000000" ] \
+  && ok "pre over-limit: tokens_limit floored to the next tier, 1000000" \
   || fail "pre over-limit: tokens_limit $(last_field tokens_limit)"
+[ "$(last_field limit_source)" = "observed" ] \
+  && ok "pre over-limit: limit_source observed" \
+  || fail "pre over-limit: limit_source $(last_field limit_source)"
 [ "$(last_field dominant_signal)" = "null" ] \
-  && ok "pre over-limit: dominant_signal is not context_pressure" \
+  && ok "pre over-limit: 697327 of 1000000 is under the threshold, no context_pressure" \
   || fail "pre over-limit: dominant_signal '$(last_field dominant_signal)'"
-grep -q "$OVER_WARN" "$TMP/hook.err" \
-  && ok "pre over-limit: one contextbuddy: warning names used and limit" \
-  || fail "pre over-limit: warning missing or misworded ($(cat "$TMP/hook.err"))"
-[ "$(grep -c '^contextbuddy: ' "$TMP/hook.err")" = "1" ] \
-  && ok "pre over-limit: exactly one stderr line" \
-  || fail "pre over-limit: $(grep -c '^contextbuddy: ' "$TMP/hook.err") stderr lines"
+[ "$(section '## tokens' | tr -d '\n')" = "697327 1000000" ] \
+  && ok "pre over-limit: ## tokens line carries the floored pair" \
+  || fail "pre over-limit: ## tokens line is '$(section '## tokens' | tr -d '\n')'"
+[ ! -s "$TMP/hook.err" ] && ok "pre over-limit: nothing on stderr" || fail "pre over-limit: stderr: $(cat "$TMP/hook.err")"
 
-# The production path: the anthropic grader copies "## tokens" from the bundle, so its own
-# fields already carry 697327/200000. The override must not fire from that copy either.
-stage_grade post 697327
+# The grader's own copy of the pair is irrelevant once the transcript carries a count.
+stage_grade post 1000
 rc="$(run_hook "$POST_HOOK" "$(payload Stop "$OVER_T" '{"stop_reason":"end_turn","last_assistant_message":"ok"}')")"
 [ "$rc" = "0" ] && ok "post over-limit: hook exits 0" || fail "post over-limit: exit $rc ($(cat "$TMP/hook.err"))"
+[ "$(last_field tokens_used)" = "697327" ] && [ "$(last_field tokens_limit)" = "1000000" ] \
+  && ok "post over-limit: stale grader pair 1000/200000 replaced by 697327/1000000" \
+  || fail "post over-limit: $(last_field tokens_used)/$(last_field tokens_limit)"
 [ "$(last_field dominant_signal)" = "null" ] \
-  && ok "post over-limit: grader copy of the over-limit count derives no context_pressure" \
+  && ok "post over-limit: no context_pressure" \
   || fail "post over-limit: dominant_signal '$(last_field dominant_signal)'"
-[ "$(last_field tokens_used)" = "697327" ] \
-  && ok "post over-limit: the grader's token fields stand" \
-  || fail "post over-limit: tokens_used $(last_field tokens_used)"
-grep -q "$OVER_WARN" "$TMP/hook.err" && ok "post over-limit: warning on stderr" || fail "post over-limit: no warning ($(cat "$TMP/hook.err"))"
 grep -q 'context pressure exceeded' "$SESSION_DIR/suggestions.md" 2>/dev/null \
   && fail "post over-limit: suggestions.md gained a context pressure block" \
   || ok "post over-limit: no context pressure block appended to suggestions.md"
+
+# The real ratio still trips: 900000 of the floored 1000000 is 90% > 85.
+stage_grade post 1000
+rc="$(run_hook "$POST_HOOK" "$(payload Stop "$PRESSURE_T" '{"stop_reason":"end_turn","last_assistant_message":"ok"}')")"
+[ "$rc" = "0" ] && ok "post pressure: hook exits 0" || fail "post pressure: exit $rc ($(cat "$TMP/hook.err"))"
+[ "$(last_field tokens_limit)" = "1000000" ] && [ "$(last_field limit_source)" = "observed" ] \
+  && ok "post pressure: 900000 floored to 1000000 observed" \
+  || fail "post pressure: $(last_field tokens_limit) $(last_field limit_source)"
+[ "$(last_field dominant_signal)" = "context_pressure" ] \
+  && ok "post pressure: 90% of the floored window sets context_pressure" \
+  || fail "post pressure: dominant_signal '$(last_field dominant_signal)'"
+[ "$(grep -c 'context pressure exceeded' "$SESSION_DIR/suggestions.md")" = "1" ] \
+  && ok "post pressure: one context pressure block in suggestions.md" \
+  || fail "post pressure: $(grep -c 'context pressure exceeded' "$SESSION_DIR/suggestions.md") blocks"
 
 # --- 6. the window size is [grader] sliding_window_turns, the key the typesafe job reads --
 CONFIG_TOML="$HOME/.claude/inspector/config.toml"

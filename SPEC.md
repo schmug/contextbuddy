@@ -183,7 +183,9 @@ A single grade. Always reflects the most recent grade event (whether `pre` or `p
 - `timestamp` — ISO 8601 UTC.
 - `scores.<dimension>.value` — integer 0-10 inclusive.
 - `scores.<dimension>.rationale` — string, max ~120 chars, references concrete turns/files where possible.
-- `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*.
+- `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*. `tokens_limit` is the session model's context window, resolved per grade by `plugin/lib/context_window.sh` (§5.4), never a constant; `tokens_used ≤ tokens_limit` always holds.
+- `model` — optional string, additive. The session's Claude model id as read from the last non-`<synthetic>` assistant record of the transcript (`claude-fable-5-1`, `claude-haiku-4-5-20251001`), or `null` when no transcript was readable. Not the grader's model (that is `signals.model`).
+- `limit_source` — optional string, additive. Where `tokens_limit` came from: `"override"` (`CONTEXTBUDDY_CONTEXT_WINDOW`), `"autocompact"` (Claude Code's auto-compact window), `"model"` (prefix table), `"observed"` (evidence floor), `"default"` (200000 fallback). See §5.4.
 - `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), or sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), or `null` (no state-changing signal).
 - `summary_update` — the rolling ~200-token summary maintained by the grader. Reflects state after this turn.
 - `signals` — optional object, backend-specific. Emitted by the `typesafe` backend only; absent for `anthropic`, `ollama` and `openai_compatible`. Every field inside is optional and consumers must tolerate new ones (§13). Known fields: `backend`, `model`, `is_task`, `task_gated`, `intent` (`choice`, `probabilities` map, `confidence`), `is_correction`, `destructive`, `bypass`, `severity`, `masses` (`confidence_low`, `atomicity_low`, `drift_high`, `pollution_high`). Surfaced in the popover's "Why this grade" disclosure (§9.3).
@@ -277,7 +279,7 @@ pollution_attention = 7
 celebrate_consecutive_n = 5
 loop_edits_in_window = 3    # N edits to same file in N consecutive turns
 loop_window_turns = 3
-context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy
+context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit per §5.4)
 
 [grader]
 model = "claude-haiku-4-5-20251001"
@@ -354,7 +356,17 @@ Two distinct triggers, both of which set `dominant_signal` to a sentinel value:
 
 The plugin computes both and sets `dominant_signal` accordingly. The grader prompt does not need to know about these — they are mechanical, not semantic.
 
-The token pair is measured, then stamped: the hooks read `tokens_used` from the last assistant `usage` record in the transcript at `transcript_path` and report `tokens_limit` as 200000 (the same literal `lib/job.sh` hands the typesafe job). When `0 < tokens_used <= tokens_limit`, they overwrite both fields of the grade with that pair in one write, so the two can never disagree, and the context-pressure check reads the stamped values. When `tokens_used > tokens_limit`, the limit is unknown for this model (a context window above 200k), not the context full: the grader's token fields stand, the hook writes one `contextbuddy:` warning to stderr, and no `context_pressure` is derived from the transcript that turn. No transcript, or none with assistant usage yet, leaves the grader's fields untouched and the check runs on them. A per-model or configurable `tokens_limit` is a separate issue.
+**Token usage.** Hook payloads carry no usage either, so `tokens_used` is measured by the hooks from the transcript at `transcript_path`: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` of the last `type: "assistant"` record carrying `usage` whose model is not `<synthetic>` (`plugin/lib/transcript.sh transcript_window`, the same arithmetic as `grader/jev.mjs parseTranscript`). That count is what the resolver below floors against. No transcript, or none with assistant usage yet, leaves the grader's `tokens_used` standing and the floor is re-applied against it.
+
+**Context window resolution.** Hook payloads carry no model or window, so `tokens_limit` is resolved per grade by `plugin/lib/context_window.sh` (mirrored in `grader/jev.mjs` and `grader/jev_shadow.py`; the prefix table is `plugin/lib/context_windows.json`, read by all three). First hit wins and is recorded as `limit_source` (§4.1):
+
+1. `override` — `CONTEXTBUDDY_CONTEXT_WINDOW` from the environment or a `.env` found by `lib/dotenv.sh`. Accepts `300000` / `300k` / `1m`. Deliberately not a `config.toml` key: the Swift parser drops the whole file on an unknown key (§4.8).
+2. `autocompact` — `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else `autoCompactWindow` in `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` (what `/autocompact` writes), same spellings. The effective ceiling is the compact trigger, not the raw window.
+3. `model` — `message.model` of the last `type: "assistant"` record in `hook.transcript_path` whose model is not `<synthetic>`, mapped by prefix: 1M for `claude-fable-*`, `claude-mythos-*`, `claude-sonnet-5*`, `claude-opus-5*`, `claude-opus-4-8*`, `claude-opus-4-7*`; 200K for `claude-haiku-*`, `claude-sonnet-4-6*`, `claude-opus-4-6*`, `claude-*-4-5*` and anything else (conservative). `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` forces 200K on the 1M rows. `[1m]` variants and gateway aliases are out of scope and rely on step 5.
+4. `default` — no transcript, no model: 200000.
+5. `observed` — evidence floor, applied after 1-4 against the measured `tokens_used`: a limit below `tokens_used` is raised to the next tier (200K → 1M; past the last tier, to `tokens_used` itself). Never lower the limit below observed usage. This is why a 697327-token transcript on a model the table does not know grades against 1M, not 200K: the limit was unknown, not the context full.
+
+The hooks resolve once per grade, print the pair on the `## tokens` line the LLM backends copy, embed it in the typesafe job, and stamp `tokens_used` / `tokens_limit` / `model` / `limit_source` onto the grade in one write before the context-pressure comparison, so the four fields can never disagree, `tokens_used ≤ tokens_limit` holds for every grade written, and all four backends agree. Budget: `tail` plus `jq` over the transcript and `settings.json`; no API calls.
 
 ### 5.5 Celebrate consecutive counting
 
@@ -725,7 +737,8 @@ gives the full 12 chars; each action button says what it writes and its
 keyboard shortcut. The same strings back the VoiceOver labels.
 
 **Token economics row** is always rendered when `tokens_limit > 0`, formatted
-`⚡ 142k / 200k (71%)`, de-emphasized below `[ui].token_row_pct` and orange
+`⚡ 142k / 200k (71%)` (a 1M window prints as `1M`: `⚡ 176k / 1M (17%)`,
+`TokenFormat.short`), de-emphasized below `[ui].token_row_pct` and orange
 above it. It was previously hidden entirely below the threshold; "how close am
 I to a compact?" is a question the user asks deliberately, and a row that
 vanishes cannot answer it.
@@ -797,6 +810,8 @@ When popover is focused:
 ```
 🟢 conf:8 atom:7 drift:2 pol:3 ⚡48k/200k
 ```
+
+The token pair abbreviates like the popover row: `k` for thousands, `M` for millions (`⚡176k/1M` on a 1M-window model).
 
 Color of the leading dot maps to current state (green for idle/celebrate, yellow for attention, orange for dizzy, gray for sleep, blue spinner for busy). Status line script must complete in <50ms; do not call APIs.
 

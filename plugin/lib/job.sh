@@ -6,19 +6,28 @@
 # itself from hook.transcript_path; this file carries only what the transcript
 # does not: phase, turn, timestamp, the raw hook payload, session.md text,
 # the prior grade's pollution (pre-phase carries it forward), thresholds,
-# window size, and model.
+# window size, the Jev model, and the resolved context window (issue #47:
+# tokens_limit, session_model, limit_source from lib/context_window.sh).
 #
 # Usage:
 #   source plugin/lib/config.sh
 #   source plugin/lib/job.sh
 #   build_job <phase> <turn> <timestamp> <hook_payload_json> <session_md_path> \
-#             <history_jsonl_path> <config_path> > job.json
+#             <history_jsonl_path> <config_path> [<context_json>] > job.json
+#
+# <context_json> is the output of resolve_context_window (context_window_for_payload
+# has the same shape) when the hook has already resolved it, so the job and the
+# grade agree; absent, build_job resolves it from the payload itself.
 #
 # Never errors on missing inputs: absent session.md → null, absent history →
 # null, unparseable payload → {} (the grader then exits 2 and the hook skips).
 
+# shellcheck source=context_window.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/context_window.sh"
+
 build_job() {
   local phase="$1" turn="$2" ts="$3" payload="$4" session_md="$5" history="$6" cfg="$7"
+  local ctx="${8:-}"
   local model window ca aa da pa prior
   model="$(toml_get_section_key "$cfg" "grader" "model")"
   model="${model:-jev-1.13.0}"
@@ -30,6 +39,9 @@ build_job() {
 
   if ! printf '%s' "$payload" | jq -e . >/dev/null 2>&1; then
     payload='{}'
+  fi
+  if [ -z "$ctx" ] || ! printf '%s' "$ctx" | jq -e 'type == "object" and (.tokens_limit | type == "number")' >/dev/null 2>&1; then
+    ctx="$(context_window_for_payload "$payload")"
   fi
 
   prior='null'
@@ -54,6 +66,7 @@ build_job() {
     --argjson prior "$prior" \
     --argjson window "$window" \
     --arg model "$model" \
+    --argjson ctx "$ctx" \
     --argjson ca "$ca" --argjson aa "$aa" --argjson da "$da" --argjson pa "$pa" \
     "${sm_arg[@]}" \
     '{
@@ -63,7 +76,9 @@ build_job() {
       hook: $hook,
       session_md: $session_md,
       prior_pollution: $prior,
-      tokens_limit: 200000,
+      tokens_limit: $ctx.tokens_limit,
+      session_model: $ctx.model,
+      limit_source: $ctx.limit_source,
       window_turns: $window,
       model: $model,
       thresholds: {confidence_attention: $ca, atomicity_attention: $aa, drift_attention: $da, pollution_attention: $pa}

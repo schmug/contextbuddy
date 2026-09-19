@@ -6,7 +6,8 @@
 #   2. latest prompt (pre-phase) or latest turn including agent response (post)
 #   3. last N typed prompts (N = [grader] sliding_window_turns, default 3)
 #   4. prior rolling summary from history.jsonl tail
-#   5. tokens_used / tokens_limit
+#   5. tokens_used (from the transcript) / tokens_limit (per session model, issue #47,
+#      lib/context_window.sh, floored so used <= limit)
 #   6. files edited in last 5 turns (post-phase, for loop pre-detection)
 #
 # Items 3 and 5, and the files stop.sh appends to edits.jsonl, come from the JSONL
@@ -40,6 +41,9 @@
 #   - A missing, unreadable or unparseable file degrades to the empty window with
 #     a `contextbuddy:` warning on stderr and return status 0, so the hook still
 #     grades and never blocks the session (SPEC.md §13).
+
+# shellcheck source=context_window.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/context_window.sh"
 
 # read_session_md <hash>
 # Echoes the session.md frontmatter content (between --- fences) or a
@@ -99,7 +103,10 @@ transcript_path_from_hook_payload() {
 #               "## latest prompt" already carries it.
 # tokens_used   input_tokens + cache_read_input_tokens + cache_creation_input_tokens
 #               of the last assistant record carrying usage; no overhead estimate.
-#               0 when there is none yet.
+#               0 when there is none yet. Records whose message.model is "<synthetic>"
+#               are harness placeholders (API errors, zero usage), not a reply: they
+#               contribute neither usage nor edits, as jev.mjs parseTranscript skips
+#               them. The model itself is read by lib/context_window.sh, not here.
 # edited_files  Unique file paths of Edit/Write/MultiEdit tool_use blocks in the
 #               assistant records after the last typed prompt: this turn's edits,
 #               which stop.sh appends to edits.jsonl for §5.4 loop detection.
@@ -156,7 +163,8 @@ transcript_window() {
     | reduce .[] as $r ({prompts: [], tokens_used: 0, edited_files: []};
         ($r | typed_prompt_text) as $p
         | if $p != null then .prompts += [$p] | .edited_files = []
-          elif ($r | type == "object" and .type == "assistant") then
+          elif ($r | type == "object" and .type == "assistant"
+                and (($r.message.model // "") != "<synthetic>")) then
             .edited_files += ($r | edit_paths)
             | (($r | usage_total) as $u | if $u != null then .tokens_used = $u else . end)
           else . end)
@@ -177,40 +185,36 @@ transcript_window() {
 
 # Accessors over a transcript_window result, for the hooks' input bundle.
 # prompts_from_window <window_json>       -> JSON array (the "last N turns" section)
-# tokens_from_window <window_json>        -> "<tokens_used> <tokens_limit>"
+# tokens_used_from_window <window_json>   -> decimal integer, 0 when absent or malformed
 # edited_files_from_window <window_json>  -> JSON array
-# tokens_limit is the 200000 lib/job.sh also hardcodes for the typesafe job. A model
-# with a larger context window yields tokens_used above it; tokens_trust below is how
-# the hooks decide whether the pair may replace the grader's fields.
+# tokens_line_from_context <context_json> -> "<tokens_used> <tokens_limit>"
+# The hooks hand tokens_used_from_window and the transcript path to lib/context_window.sh
+# resolve_context_window (issue #47); its {tokens_used, tokens_limit, model, limit_source}
+# is the one pair the "## tokens" line, the typesafe job and the written grade carry, and
+# its evidence floor guarantees tokens_used <= tokens_limit, so a count above a model's
+# nominal window raises the limit instead of tripping context_pressure on every turn.
 prompts_from_window() {
   printf '%s' "$1" | jq -c '.prompts // []' 2>/dev/null || printf '[]'
 }
 
-tokens_from_window() {
+tokens_used_from_window() {
   local used
   used="$(printf '%s' "$1" | jq -r '.tokens_used // 0' 2>/dev/null)" || used=0
-  printf '%s 200000' "${used:-0}"
+  # Digits-only guard: the value is a string from jq over untrusted input, never handed
+  # to [ -gt ] or --argjson unchecked.
+  case "$used" in ''|*[!0-9]*) used=0 ;; esac
+  printf '%s' "$used"
 }
 
 edited_files_from_window() {
   printf '%s' "$1" | jq -c '.edited_files // []' 2>/dev/null || printf '[]'
 }
 
-# tokens_trust <tokens_used> <tokens_limit>
-# Prints "ok" when 0 < used <= limit, "over" when used > limit, nothing when there is
-# no count yet (0) or either value is not a decimal integer. The hooks stamp the pair
-# over the grader's tokens_used/tokens_limit only on "ok". On "over" the limit is
-# unknown for this model (a per-model limit is a separate issue), not the context
-# full: the grader's fields stand and no context_pressure is derived from the
-# transcript, which would otherwise fire on every turn (697327 * 100 / 200000 = 348).
-# Digits-only guard first: both values are strings from jq over untrusted input,
-# never handed to [ -gt ] unchecked.
-tokens_trust() {
-  local used="$1" limit="$2"
-  case "$used" in ''|*[!0-9]*) return 0 ;; esac
-  case "$limit" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$used" -gt 0 ] || return 0
-  if [ "$used" -le "$limit" ]; then printf 'ok'; else printf 'over'; fi
+tokens_line_from_context() {
+  if command -v jq >/dev/null 2>&1; then
+    printf '%s' "$1" | jq -r '"\(.tokens_used // 0) \(.tokens_limit // 200000)"' 2>/dev/null && return 0
+  fi
+  printf '0 %s' "$CONTEXT_WINDOW_DEFAULT"
 }
 
 # files_edited_recent <hash> <window>

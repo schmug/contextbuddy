@@ -75,10 +75,15 @@ CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "contex
 WINDOW_TURNS="$(toml_get_section_int "$CONFIG_PATH" "grader" "sliding_window_turns" 3)"
 TRANSCRIPT_PATH="$(transcript_path_from_hook_payload "$HOOK_PAYLOAD")"
 WINDOW_JSON="$(transcript_window "$TRANSCRIPT_PATH" "$WINDOW_TURNS")"
-TOKENS_LINE="$(tokens_from_window "$WINDOW_JSON")"
-TOKENS_USED_TX="${TOKENS_LINE%% *}"
-TOKENS_LIMIT_TX="${TOKENS_LINE##* }"
-TOKENS_TRUST="$(tokens_trust "$TOKENS_USED_TX" "$TOKENS_LIMIT_TX")"
+TOKENS_USED_TX="$(tokens_used_from_window "$WINDOW_JSON")"
+
+# Context window for this session (issue #47, lib/context_window.sh): model from the
+# transcript tail, limit from the override / auto-compact window / model table, floored
+# against the transcript count above so used <= limit always. Resolved once: the
+# "## tokens" line the LLM backends copy, the typesafe job and the grade written below
+# all carry this one pair.
+CTX="$(resolve_context_window "$TRANSCRIPT_PATH" "$TOKENS_USED_TX")"
+TOKENS_LINE="$(tokens_line_from_context "$CTX")"
 
 if command -v jq >/dev/null 2>&1; then
   EDITED_FILES_JSON="$(edited_files_from_window "$WINDOW_JSON")"
@@ -124,7 +129,7 @@ fi
 
 # Job file for the typesafe backend (see user_prompt_submit.sh).
 build_job "post" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
-  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" \
+  "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" "$CTX" \
   > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
 
 GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
@@ -156,29 +161,29 @@ if command -v jq >/dev/null 2>&1; then
   # override or not, is a single line.
   GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c .)"
 
-  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4). The
-  # transcript pair replaces both token fields in one failure-safe jq call only when
-  # 0 < used <= limit; above the limit the grader's fields stand, a warning goes to
-  # stderr and no context_pressure is derived (see user_prompt_submit.sh for the why).
-  case "$TOKENS_TRUST" in
-    ok)
-      NEW="$(printf '%s' "$GRADE_JSON" | jq -c --argjson u "$TOKENS_USED_TX" --argjson l "$TOKENS_LIMIT_TX" \
-        '.tokens_used = $u | .tokens_limit = $l' 2>/dev/null)" && [ -n "$NEW" ] && GRADE_JSON="$NEW"
-      ;;
-    over)
-      log_err "tokens_used $TOKENS_USED_TX exceeds tokens_limit $TOKENS_LIMIT_TX; limit unknown for this model, leaving the grader's token fields"
-      ;;
-  esac
+  # Token economics are measured by the plugin, not the grader (SPEC.md §5.4): the
+  # transcript's tokens_used and the per-model, floored tokens_limit from lib/context_window.sh
+  # (issue #47) replace the grader's four token fields in one failure-safe jq call; the
+  # grader's tokens_used stands only when the transcript has none (see
+  # user_prompt_submit.sh for the full note).
+  TOKENS_USED="$TOKENS_USED_TX"
+  [ "$TOKENS_USED" -gt 0 ] 2>/dev/null || TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
+  case "$TOKENS_USED" in ''|*[!0-9]*) TOKENS_USED=0 ;; esac
+  CTX_MODEL="$(printf '%s' "$CTX" | jq -r '.model // empty')"
+  # shellcheck disable=SC2046  # two space-separated words by construction
+  set -- $(context_window_floor "$TOKENS_USED" "$(printf '%s' "$CTX" | jq -r '.tokens_limit')" "$(printf '%s' "$CTX" | jq -r '.limit_source')")
+  TOKENS_LIMIT="$1"; LIMIT_SOURCE="$2"
+  NEW="$(printf '%s' "$GRADE_JSON" | jq -c \
+    --argjson used "$TOKENS_USED" --argjson lim "$TOKENS_LIMIT" --arg src "$LIMIT_SOURCE" --arg model "$CTX_MODEL" \
+    '.tokens_used = $used | .tokens_limit = $lim | .limit_source = $src
+     | .model = (if $model == "" then null else $model end)' 2>/dev/null)" \
+    && [ -n "$NEW" ] && GRADE_JSON="$NEW"
 
   # Mechanically override dominant_signal: loop wins over context_pressure
-  # which wins over the grader's dimension choice. context_pressure reads the grade's
-  # own fields and is skipped when the transcript count exceeds the limit (the grader
-  # copied that same count from the bundle).
+  # which wins over the grader's dimension choice.
   if [ "$LOOP_DETECTED" = "true" ]; then
     GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "loop"')"
-  elif [ "$TOKENS_TRUST" != "over" ]; then
-    TOKENS_USED="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_used // 0')"
-    TOKENS_LIMIT="$(printf '%s' "$GRADE_JSON" | jq -r '.tokens_limit // 200000')"
+  else
     if [ "$TOKENS_LIMIT" -gt 0 ] && \
        [ "$(( TOKENS_USED * 100 / TOKENS_LIMIT ))" -gt "$CONTEXT_PRESSURE_PCT" ]; then
       GRADE_JSON="$(printf '%s' "$GRADE_JSON" | jq -c '.dominant_signal = "context_pressure"')"
