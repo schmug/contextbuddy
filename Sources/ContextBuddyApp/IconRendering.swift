@@ -14,7 +14,8 @@ import ContextBuddyCore
 // SF Symbols set (CoreGlyphs `name_availability.plist`), which is the floor
 // Package.swift sets; an unknown name resolves to nil and renders a blank
 // menu bar with no error.
-// The three chromatic tints are appearance-dependent — see `orange` below.
+// Four tints are appearance-dependent — the three chromatic ones (see
+// `orange` below) and `sleep` (#89).
 // Animation policy is owned here so StatusIconImageView can mirror it without
 // re-deciding. `animationsEnabled` is `[ui].animations_enabled` ANDed with the
 // system Reduce Motion switch — StatusItemIcon.animationsEnabled(ui:reduceMotion:)
@@ -55,7 +56,7 @@ enum IconStyle {
     static func style(for state: BuddyState, animationsEnabled: Bool) -> Style {
         switch state {
         case .sleep:
-            return Style(symbol: "moon.zzz", tint: .secondaryLabelColor, animation: .none)
+            return Style(symbol: "moon.zzz", tint: sleep, animation: .none)
         case .idle:
             return Style(symbol: "record.circle", tint: .labelColor, animation: .none)
         case .busy:
@@ -78,7 +79,7 @@ enum IconStyle {
 
     // §9.1's three chromatic tints, each a dynamic color: the system color the
     // SPEC names on a dark menu bar, a darkened variant of the same hue family
-    // on a light one.
+    // on a light one. `sleep` below is the fourth dynamic tint.
     //
     // The plain `.system*` colors are only legible on a dark bar. Resolved and
     // composited over sRGB grey 0.96 they measure 2.11:1 (orange), 1.38:1
@@ -96,6 +97,26 @@ enum IconStyle {
     static var yellow: NSColor { Tints.shared.yellow }
     static var pink: NSColor { Tints.shared.pink }
 
+    // `sleep`'s tint, the fourth appearance-dependent one (#89).
+    //
+    // It was `.secondaryLabelColor` — white at alpha 0.549 on a dark bar, black
+    // at alpha 0.498 on a light one — and §9.1 exempted it from the 4.5:1 floor
+    // at 3.88:1 on the light bar, on the grounds that it is dimmed by contract.
+    // "Quiet" and "below the floor" are not the same claim, and `sleep` is the
+    // state the buddy holds most of the time, so the exemption is gone and the
+    // two alphas are pinned here instead of inherited.
+    //
+    // Deliberately still an alpha over black and white rather than an opaque
+    // grey, which is the form the three chromatic tints take. A tint composited
+    // at alpha tracks whatever is behind the translucent menu bar; an opaque
+    // one does not. Over the mid-tone bar reported in #89 (sRGB 96,103,126) the
+    // light variant measures 2.40:1, where `#6F6F6F` — the opaque grey that
+    // measures the same 4.6:1 on the modelled 0.96 bar — manages 1.12:1.
+    // Whether §9.1's model should be re-based on a translucent bar at all is
+    // #90; keeping the alpha costs nothing under the current model and does not
+    // pre-empt that decision.
+    static var sleep: NSColor { Tints.shared.sleep }
+
     // One instance, built once, so each accessor above hands back the *same*
     // NSColor every call. IconStyle.Style is Equatable and
     // StatusIconImageView.render compares the incoming style against the
@@ -104,7 +125,7 @@ enum IconStyle {
     // remove and re-add the held effect on every snapshot and make dizzy's
     // wiggle visibly restart.
     //
-    // A holder rather than three `nonisolated(unsafe) static let`s: NSColor is
+    // A holder rather than four `nonisolated(unsafe) static let`s: NSColor is
     // Sendable on the macOS 26 SDK and not on the macos-15 CI runner's, so the
     // annotation warns on one and is required on the other (#43, #46). This
     // compiles clean on both. The stored properties are immutable and AppKit
@@ -115,6 +136,9 @@ enum IconStyle {
         let orange = adaptive("contextbuddy.attention", light: 0xB1_50_00) { .systemOrange }
         let yellow = adaptive("contextbuddy.celebrate", light: 0x7B_6C_00) { .systemYellow }
         let pink = adaptive("contextbuddy.heart", light: 0xC4_20_48) { .systemPink }
+        let sleep = adaptive("contextbuddy.sleep",
+                             light: { srgb(0x00_00_00, alpha: 0.55) },
+                             dark: { srgb(0xFF_FF_FF, alpha: 0.60) })
     }
 
     // `bestMatch` rather than a raw name comparison so the high-contrast and
@@ -129,18 +153,30 @@ enum IconStyle {
         light: UInt32,
         dark: @escaping @Sendable () -> NSColor
     ) -> NSColor {
+        adaptive(name, light: { srgb(light) }, dark: dark)
+    }
+
+    // The same thing where the light variant is not an opaque hex either —
+    // `sleep` is the one such tint (#89).
+    private static func adaptive(
+        _ name: String,
+        light: @escaping @Sendable () -> NSColor,
+        dark: @escaping @Sendable () -> NSColor
+    ) -> NSColor {
         NSColor(name: NSColor.Name(name)) { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark() : srgb(light)
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark() : light()
         }
     }
 
     // 0xRRGGBB in sRGB. Pinned to sRGB, not the generic/calibrated space, so
-    // the measured contrast ratios above are the ones that actually ship.
-    private static func srgb(_ hex: UInt32) -> NSColor {
+    // the measured contrast ratios above are the ones that actually ship —
+    // which is also why `sleep`'s two variants spell out 0x000000 and 0xFFFFFF
+    // here rather than using `NSColor(white:alpha:)`, whose white is calibrated.
+    private static func srgb(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
         NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
                 green: CGFloat((hex >> 8) & 0xFF) / 255,
                 blue: CGFloat(hex & 0xFF) / 255,
-                alpha: 1)
+                alpha: alpha)
     }
 
     struct Style: Equatable {

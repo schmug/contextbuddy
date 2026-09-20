@@ -61,24 +61,77 @@ final class StatusItemIconTests: XCTestCase {
         }
     }
 
-    // The same floors on the light menu bar, which is where #44 lived: §9.1's
+    // The same floor on the light menu bar, which is where #44 lived: §9.1's
     // plain `.systemOrange`/`.systemYellow`/`.systemPink` measured 1.38:1 to
     // 3.34:1 against a near-white bar, `celebrate` close to invisible. §9.1 now
     // names a darkened light-appearance variant for each, and this is the
     // assertion those variants exist to satisfy.
     //
-    // sleep is the one exception: `.secondary` by contract — deliberately
-    // dimmed, and the only state whose message is "nothing is happening" — so
-    // it is held to the 3:1 non-text/UI-component floor instead of 4.5:1.
-    // Measured 3.88:1.
+    // There is no longer an exception. `sleep` was held to the 3:1 non-text
+    // floor on the grounds that `.secondary` is dimmed by contract, and it
+    // measured 3.88:1 here; #89 dropped that exemption, because "quiet" and
+    // "below the floor" are different claims and `sleep` is the state the buddy
+    // holds most of the time. It now measures 4.66:1 — still the lowest of the
+    // seven on this bar, which testSleepStaysTheQuietestState pins.
     func testEveryTintClearsItsFloorOnTheLightMenuBar() {
         for state in BuddyState.allCases {
-            let floor = state == .sleep ? 3.0 : 4.5
             let ratio = tintContrast(state, appearance: .aqua, background: Self.lightMenuBar)
             XCTAssertGreaterThanOrEqual(
-                ratio, floor,
-                "\(state.rawValue) on the light menu bar: \(Colorimetry.f(ratio)):1, "
-                + "floor \(Colorimetry.f(floor)):1"
+                ratio, 4.5,
+                "\(state.rawValue) on the light menu bar: \(Colorimetry.f(ratio)):1"
+            )
+        }
+    }
+
+    // #89's other half: raising `sleep` to the floor must not make it shout.
+    //
+    // "Least assertive" is not the same as "lowest luminance contrast" — a
+    // saturated pink at 4.84:1 (`heart`, dark bar) draws the eye harder than a
+    // grey at 6.85:1 — so the claim §9.1 makes is a conjunction, and each
+    // clause is asserted here:
+    //
+    //   * `sleep` is the only tint that is achromatic AND below full label
+    //     strength. `idle`/`busy` are achromatic too but take `.labelColor`
+    //     outright; the other four carry a hue.
+    //   * It is motionless. `idle` is too; the remaining five animate.
+    //   * It carries at most 60% of `idle`'s contrast in both appearances
+    //     (measured 55% dark, 33% light) — expressed against `idle` rather than
+    //     as an absolute ceiling so it does not drift when `.labelColor` does.
+    //   * On the light bar, where every one of the seven tints is a value this
+    //     repo pins rather than a system color, it is the lowest of the set.
+    //     Not asserted on the dark bar: three tints there are `.system*`
+    //     colors, so their ordering is a property of macOS, not of this repo.
+    func testSleepStaysTheQuietestState() {
+        let sleep = IconStyle.style(for: .sleep, animationsEnabled: true)
+        XCTAssertEqual(sleep.animation, .none, "sleep must not animate")
+
+        for (appearance, background) in Self.menuBars {
+            let saturation = self.saturation(of: sleep.tint, in: appearance)
+            XCTAssertEqual(saturation, 0, accuracy: 0.001,
+                           "sleep on \(appearance.rawValue) is not achromatic: saturation "
+                           + "\(Colorimetry.f(saturation))")
+
+            // Spelled out rather than inlined into the interpolation: arithmetic
+            // inside a message expression is what blew the type checker's
+            // budget on 6.4 elsewhere in this file (CLAUDE.md, Swift 6.1.2).
+            let quiet = tintContrast(.sleep, appearance: appearance, background: background)
+            let loud = tintContrast(.idle, appearance: appearance, background: background)
+            let share: Double = quiet / loud
+            let percent: Double = share * 100
+            XCTAssertLessThanOrEqual(
+                share, 0.6,
+                "sleep on \(appearance.rawValue) carries \(Colorimetry.f(percent))% of "
+                + "idle's contrast (\(Colorimetry.f(quiet)):1 against \(Colorimetry.f(loud)):1)"
+            )
+        }
+
+        let quiet = tintContrast(.sleep, appearance: .aqua, background: Self.lightMenuBar)
+        for state in BuddyState.allCases where state != .sleep {
+            let other = tintContrast(state, appearance: .aqua, background: Self.lightMenuBar)
+            XCTAssertLessThan(
+                quiet, other,
+                "sleep is no longer the quietest tint on the light menu bar: "
+                + "\(Colorimetry.f(quiet)):1 against \(state.rawValue)'s \(Colorimetry.f(other)):1"
             )
         }
     }
@@ -129,8 +182,9 @@ final class StatusItemIconTests: XCTestCase {
 
     // MARK: - Appearance adaptivity
 
-    // sleep/idle/busy take `.labelColor` / `.secondaryLabelColor`, which must
-    // resolve per appearance rather than being pinned to one variant. The
+    // sleep/idle/busy are the achromatic states: `idle`/`busy` take
+    // `.labelColor` and `sleep` a dynamic white/black pinned in IconStyle, and
+    // both must resolve per appearance rather than to one variant. The
     // invariant is the *direction*: the glyph lands on the opposite side of its
     // own background in each appearance. Direction is stable across raster
     // scales even though the magnitude is not, and a hardcoded white inverts
@@ -292,10 +346,10 @@ final class StatusItemIconTests: XCTestCase {
     //
     // Measured through an opaque tint, so this is the glyph's own weight and
     // nothing else. The shipped tint's alpha is deliberately not in it:
-    // `sleep` takes `.secondaryLabelColor`, which is semi-transparent by
-    // contract, and renders 6.06% against the same moon's 9.38% opaque. That
-    // dimming is a property of the colour, governed by the contrast floors
-    // above and §9.1's `sleep` exception — folding it in here would report a
+    // `sleep` is the one translucent tint, and renders 6.63% on a dark bar and
+    // 6.06% on a light one against the same moon's 11.07% opaque. That dimming
+    // is a property of the colour, governed by the contrast floors above and by
+    // testSleepStaysTheQuietestState — folding it in here would report a
     // deliberately quiet state as a badly drawn one. That the tinted glyph is
     // still thick enough to see is a separate assertion
     // (testEveryStateDrawsEnoughInkToBeVisible).
@@ -567,7 +621,7 @@ extension StatusItemIconTests {
 
     // WCAG contrast of a state's declared tint against a menu bar background,
     // resolved under `appearance` and composited at the tint's own alpha.
-    // `.secondaryLabelColor` is semi-transparent, so the alpha matters.
+    // `sleep` and `.labelColor` are semi-transparent, so the alpha matters.
     func tintContrast(_ state: BuddyState, appearance: NSAppearance.Name, background: Double) -> Double {
         let tint = IconStyle.style(for: state, animationsEnabled: false).tint
         var rgba = (0.0, 0.0, 0.0, 1.0)
@@ -587,10 +641,10 @@ extension StatusItemIconTests {
     // Renders one state offscreen. Returns the alpha-weighted mean of the glyph
     // composited over `background`, plus how much ink it painted.
     //
-    // Compositing rather than sampling only opaque pixels matters:
-    // `.secondaryLabelColor` is semi-transparent throughout, so an "alpha > 0.9"
-    // filter finds no pixels at all for `sleep`. Only use the mean for
-    // comparisons between two renders — see the note at the top of the file.
+    // Compositing rather than sampling only opaque pixels matters: `sleep`'s
+    // tint is semi-transparent throughout, so an "alpha > 0.9" filter finds no
+    // pixels at all for it. Only use the mean for comparisons between two
+    // renders — see the note at the top of the file.
     func render(
         _ state: BuddyState,
         appearance: NSAppearance.Name,
@@ -675,6 +729,18 @@ extension StatusItemIconTests {
             return StatusItemIcon.Motion(held: nil, oneShotsStarted: -1, lastOneShot: nil)
         }
         return view.motion
+    }
+
+    // HSV saturation of a resolved tint. Zero means the tint carries no hue at
+    // all, which is what makes `sleep` and `idle`/`busy` achromatic.
+    func saturation(of color: NSColor, in appearance: NSAppearance.Name) -> Double {
+        var rgb = (0.0, 0.0, 0.0)
+        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
+            guard let c = color.usingColorSpace(.sRGB) else { return }
+            rgb = (Double(c.redComponent), Double(c.greenComponent), Double(c.blueComponent))
+        }
+        let mx = max(rgb.0, rgb.1, rgb.2), mn = min(rgb.0, rgb.1, rgb.2)
+        return mx <= 0 ? 0 : (mx - mn) / mx
     }
 
     // Resolves a dynamic NSColor under `appearance` and returns its hue.

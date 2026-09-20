@@ -687,7 +687,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 
 | State | SF Symbol | Tint | Animation |
 |---|---|---|---|
-| `sleep` | `moon.zzz` | `.secondary` (dimmed) | none |
+| `sleep` | `moon.zzz` | dimmed neutral — white at alpha 0.60 on a dark menu bar, black at alpha 0.55 on a light one | none |
 | `idle` | `record.circle` | `.primary` | none |
 | `busy` | `progress.indicator` | `.primary` | subtle rotation, indefinite |
 | `attention` | `exclamationmark.triangle` | `.orange` — `.systemOrange` on a dark menu bar, `#B15000` on a light one | 300ms scale pulse on transition (one-shot) |
@@ -744,20 +744,38 @@ Measured 9.27% (`busy`) to 16.37% (`idle`) = 1.77x. Before #37 it spanned 5.9x,
 from `circle.dotted` at 3.18% — the faintest glyph in the set, and the one
 shown most of the time work is happening — to `heart.fill` at 18.63%.
 
-The tint's own alpha is deliberately outside that number. `sleep` is
-`.secondaryLabelColor` and renders 6.06% once its transparency is applied
-against the same moon's 11.07% opaque; that dimming is a property of the
-colour, governed by the contrast floors below, and folding it in here would
-report a deliberately quiet state as a badly drawn one.
+The tint's own alpha is deliberately outside that number. `sleep` is the one
+translucent tint and renders 6.63% on a dark bar and 6.06% on a light one once
+its transparency is applied, against the same moon's 11.07% opaque; that
+dimming is a property of the colour, governed by the contrast floors below, and
+folding it in here would report a deliberately quiet state as a badly drawn
+one.
 
 
 **Contrast floor.** Every tint clears WCAG 4.5:1 against the menu bar in both
-appearances. `sleep` is the one exception: it is `.secondary` by contract —
-deliberately dimmed, and the only state whose message is "nothing is
-happening" — so it is held to the 3:1 non-text floor instead.
+appearances. There are no exceptions.
 
-That is why the three chromatic tints are appearance-dependent rather than the
-single system color each row used to name. `.systemOrange`, `.systemYellow`
+`sleep` used to be one. #44 held it to the 3:1 non-text floor on the grounds
+that `.secondaryLabelColor` is dimmed by contract, and it shipped at 3.88:1 on
+a light bar — the state the buddy holds most of the time, and the only one not
+protected by the floor. "Quiet" and "below the floor" are different claims, so
+#89 dropped the exemption and pinned `sleep`'s two alphas here rather than
+inheriting whatever `.secondaryLabelColor` resolves to: white at 0.60 on a dark
+bar (was 0.549) and black at 0.55 on a light one (was 0.498).
+
+**`sleep` stays the least assertive of the seven**, which is a conjunction, not
+a contrast ranking — a saturated pink at 4.84:1 (`heart`, dark bar) draws the
+eye harder than a grey at 6.85:1. `sleep` is the only tint that is achromatic
+*and* below full label strength; it is motionless; it carries at most 60% of
+`idle`'s contrast in either appearance (measured 55% dark, 33% light); and on
+the light bar, where all seven tints are values this repo pins rather than
+system colours, it is the lowest-contrast state of the set. Each clause is
+asserted in `Tests/ContextBuddyAppTests/StatusItemIconTests.swift`. The dark-bar
+ordering is not asserted, because three tints there are `.system*` colours and
+their ordering is a property of macOS.
+
+The floor is also why the three chromatic tints are appearance-dependent rather
+than the single system color each row used to name. `.systemOrange`, `.systemYellow`
 and `.systemPink` are legible on a dark bar and not on a light one: resolved
 and composited over sRGB grey 0.96 they measure 2.11:1, 1.38:1 and 3.34:1,
 with `celebrate` effectively invisible. The light-appearance hex values above
@@ -770,7 +788,7 @@ bar):
 
 | State | dark bar | light bar |
 |---|---|---|
-| `sleep` | 5.95:1 | 3.88:1 |
+| `sleep` | 6.85:1 | 4.66:1 |
 | `idle` / `busy` | 12.46:1 | 13.96:1 |
 | `attention` / `dizzy` | 7.63:1 | 4.79:1 |
 | `celebrate` | 12.06:1 | 4.82:1 |
@@ -782,9 +800,10 @@ and `heart`.
 
 #37 changed four glyphs and no tints, and the table above was re-measured
 after that change rather than assumed to still hold — contrast is a property
-of the resolved tint, so the numbers are unchanged.
+of the resolved tint, so those numbers were unchanged. #89 then moved `sleep`'s
+row, and only that row.
 
-Two constraints on anyone changing these values:
+Three constraints on anyone changing these values:
 
 - Contrast is a property of the tint, not of the rendered glyph. An
   alpha-weighted mean over a thin stroke is dominated by partially covered
@@ -797,6 +816,14 @@ Two constraints on anyone changing these values:
   (`#D80048`) clipped there and rendered 7 degrees off its declared hue, which
   the rendered-hue test in `Tests/ContextBuddyAppTests/StatusItemIconTests.swift`
   catches at a 5-degree tolerance.
+- `sleep`'s translucency is load-bearing and must not be flattened into an
+  opaque grey of the same measured contrast. A tint composited at alpha tracks
+  whatever shows through the translucent bar; an opaque one does not. Over the
+  mid-tone bar reported in #89 (sRGB 96,103,126) the light variant measures
+  2.40:1, where `#6F6F6F` — the opaque grey with the same 4.6:1 against the
+  modelled 0.96 bar — measures 1.12:1. The table above is still stated against
+  the two modelled greys; whether that model should be re-based on a
+  translucent bar at all is a separate open question.
 
 ### 9.2 Animation policy
 
