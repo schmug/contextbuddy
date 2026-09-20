@@ -335,14 +335,18 @@ struct PopoverView: View {
 
     // MARK: - Formatting
 
+    // Kept in step with the §9.1 menu-bar glyphs (#37): `idle` is now
+    // `record.circle`, a dot inside a ring, and `dizzy` is `repeat`, a pair of
+    // looping arrows. The other five are unchanged, `attention` included — its
+    // 🟡 is the example §9.3 itself gives.
     private var emoji: String {
         switch snapshot.state {
         case .sleep: return "💤"
-        case .idle: return "⚪"
+        case .idle: return "🔘"
         case .busy: return "🔄"
         case .attention: return "🟡"
         case .celebrate: return "✨"
-        case .dizzy: return "🌀"
+        case .dizzy: return "🔁"
         case .heart: return "💖"
         }
     }

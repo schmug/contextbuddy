@@ -2,6 +2,18 @@ import AppKit
 import ContextBuddyCore
 
 // Maps BuddyState to (SFSymbol name, tint, animation policy) per §9.1.
+//
+// The glyph set was redesigned in #37 against three measured faults: no
+// SymbolConfiguration at all, optical weight swinging 5.5x across the seven,
+// and two pairs of states that shared a silhouette. `circle` (idle) and
+// `circle.dotted` (busy) differed only in stroke continuity — 0.109 apart in
+// silhouette, which at 15pt is not a difference — and `attention` and `dizzy`
+// were both an orange exclamation mark. Since §9.6 gives the buddy no
+// notification, no sound and no window, two states that read alike are two
+// states the product cannot signal. Every symbol below exists in the macOS 15
+// SF Symbols set (CoreGlyphs `name_availability.plist`), which is the floor
+// Package.swift sets; an unknown name resolves to nil and renders a blank
+// menu bar with no error.
 // The three chromatic tints are appearance-dependent — see `orange` below.
 // Animation policy is owned here so StatusIconImageView can mirror it without
 // re-deciding. `animationsEnabled` is `[ui].animations_enabled` ANDed with the
@@ -9,14 +21,45 @@ import ContextBuddyCore
 // composes them and MenubarController.renderIcon() passes the result — and
 // false suppresses all motion (still emits the symbol + tint). (#36)
 enum IconStyle {
+    // One configuration for all seven glyphs (#37). Without it each symbol
+    // rendered at its own natural metrics — widths of 15, 16 and 17pt, heights
+    // of 14, 15 and 17pt — so the set had no shared type size at all.
+    //
+    // 15pt is the largest size at which every glyph in the table below still
+    // fits inside StatusItemIcon.glyphBox; the widest, `progress.indicator`,
+    // measures 19x18pt and `repeat` 20x16pt. The image view scales nothing
+    // (`imageScaling = .scaleNone`), so a glyph wider than the box is clipped
+    // rather than shrunk — `infinity` at 23pt was rejected for exactly that.
+    // StatusItemIconTests asserts the fit for every state.
+    //
+    // This does NOT make `image.size` equal across the seven: SF Symbols have
+    // different aspect ratios, and the only way to force one size is to draw
+    // each glyph into a fixed canvas — which replaces the NSSymbolImageRep
+    // with an NSCustomImageRep and silently kills every §9.1 animation with
+    // it (#35's regression, re-measured: `isSymbolImage` goes 1 -> 0). Equal
+    // widths are not needed anyway; StatusItemIcon.length is fixed, so the
+    // status item has not changed width since #35 regardless of the glyph.
+    // Held the same way as the tints below, and for the same reason:
+    // NSImage.SymbolConfiguration is not Sendable, so a plain `static let`
+    // fails strict concurrency, and `nonisolated(unsafe)` is load-bearing on
+    // one of the two SDKs this repo builds against and a warning on the other
+    // (#43, #46). The holder compiles clean on both. The instance is
+    // immutable and only read.
+    static var symbolConfiguration: NSImage.SymbolConfiguration { Metrics.shared.configuration }
+
+    private final class Metrics: @unchecked Sendable {
+        static let shared = Metrics()
+        let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+    }
+
     static func style(for state: BuddyState, animationsEnabled: Bool) -> Style {
         switch state {
         case .sleep:
             return Style(symbol: "moon.zzz", tint: .secondaryLabelColor, animation: .none)
         case .idle:
-            return Style(symbol: "circle", tint: .labelColor, animation: .none)
+            return Style(symbol: "record.circle", tint: .labelColor, animation: .none)
         case .busy:
-            return Style(symbol: "circle.dotted", tint: .labelColor,
+            return Style(symbol: "progress.indicator", tint: .labelColor,
                          animation: animationsEnabled ? .rotateRepeating : .none)
         case .attention:
             return Style(symbol: "exclamationmark.triangle", tint: orange,
@@ -25,10 +68,10 @@ enum IconStyle {
             return Style(symbol: "sparkles", tint: yellow,
                          animation: animationsEnabled ? .bounceOnce : .none)
         case .dizzy:
-            return Style(symbol: "exclamationmark.arrow.circlepath", tint: orange,
+            return Style(symbol: "repeat", tint: orange,
                          animation: animationsEnabled ? .wiggleRepeating : .none)
         case .heart:
-            return Style(symbol: "heart.fill", tint: pink,
+            return Style(symbol: "heart", tint: pink,
                          animation: animationsEnabled ? .pulseOnce : .none)
         }
     }
@@ -142,6 +185,11 @@ enum StatusItemIcon {
     // to move without clipping: the 22pt glyph square plus 3pt each side.
     static let length: CGFloat = 28
 
+    // The square the glyph is drawn in, inside that item. IconStyle's shared
+    // SymbolConfiguration is sized so every §9.1 symbol fits here: the image
+    // view scales nothing, so anything larger is clipped on all four sides.
+    static let glyphBox = NSSize(width: 22, height: 22)
+
     // What the image view last did about motion. StatusItemIconTests reads it:
     // NSImageView exposes no list of the symbol effects running on it, so this
     // record is the only way to assert §9.2's once-per-transition rule.
@@ -233,8 +281,13 @@ final class StatusIconImageView: NSImageView {
         // the multicolor variant for the rest — and silently discards every
         // tint in the table above (#34). ContextBuddyAppTests measures the
         // rendered pixels, so flipping it back fails the suite.
-        let symbol = NSImage(systemSymbolName: next.symbol, accessibilityDescription: state.rawValue)
+        // `withSymbolConfiguration` returns a new NSImage and does not carry
+        // the accessibility description over, so it is set again on the result
+        // — StatusItemIconTests reads it off the shipped image.
+        let symbol = NSImage(systemSymbolName: next.symbol, accessibilityDescription: state.rawValue)?
+            .withSymbolConfiguration(IconStyle.symbolConfiguration)
         symbol?.isTemplate = true
+        symbol?.accessibilityDescription = state.rawValue
         // Effects belong to the view, not the image: clear the old state's
         // held effect, and any one-shot still playing, before the next starts.
         removeAllSymbolEffects(animated: false)
