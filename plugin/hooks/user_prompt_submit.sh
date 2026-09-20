@@ -42,6 +42,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/config.sh"
 # shellcheck source=../lib/job.sh
 . "$PLUGIN_ROOT/lib/job.sh"
+# shellcheck source=../lib/grader_status.sh
+. "$PLUGIN_ROOT/lib/grader_status.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -121,6 +123,10 @@ spawn_jev_shadow || true
 CONFIG_PATH="$(config_path)"
 GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
+# Named in grader_status.json so the trace says which backend could not run
+# (§4.10). The default matches grader/invoke.sh's own.
+GRADER_BACKEND="$(toml_get_section_key "$CONFIG_PATH" "grader" "backend")"
+GRADER_BACKEND="${GRADER_BACKEND:-anthropic}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 # [grader.typesafe].harm_action (issue #7): the destructive/bypass probability at or above
 # which grader/jev.mjs sets dominant_signal "harm". Read here only to name, in the
@@ -195,14 +201,19 @@ build_job "pre" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
   "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" "$CTX" \
   > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
 
-# Call grader. Failures here are non-fatal.
+# Call grader. Failures here are non-fatal. The exit code is kept rather than
+# swallowed with `|| true`: it is the only reliable classifier for why a grade did
+# not arrive, and grader_status.json (§4.10) is derived from it, never from stderr.
+# Stderr still goes to the hook's own stderr so `claude --debug` shows it verbatim.
 GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
   "$PLUGIN_ROOT/grader/system_prompt.md" \
   "$INPUT_FILE" \
   "$GRADER_MODEL" \
-  "$CONFIG_PATH" 2>/dev/null || true)"
+  "$CONFIG_PATH")"
+GRADER_RC=$?
 
 if [ -z "$GRADE_JSON" ]; then
+  write_grader_status "$PROJECT_HASH" "pre" "$TURN" "$TIMESTAMP" "$GRADER_BACKEND" "$GRADER_RC" "false"
   log_err "grader returned no output for turn $TURN; skipping"
   exit 0
 fi
@@ -216,6 +227,10 @@ if command -v jq >/dev/null 2>&1; then
     and (.scores.drift.value | type == "number")
     and (.scores.pollution.value | type == "number")
   ' >/dev/null 2>&1; then
+    # The grader answered but not with a §4.1 grade. Same reason class as an
+    # invoke.sh exit 4, and recorded here because invoke.sh's own jq check only
+    # proves the output parses as JSON, not that it is a grade.
+    write_grader_status "$PROJECT_HASH" "pre" "$TURN" "$TIMESTAMP" "$GRADER_BACKEND" 4 "false"
     log_err "grade output failed schema validation; skipping"
     exit 0
   fi
@@ -292,6 +307,11 @@ HISTORY_PATH="$(history_jsonl_path "$PROJECT_HASH")"
 printf '%s\n' "$GRADE_JSON" | atomic_write "$TURN_PATH"
 printf '%s\n' "$GRADE_JSON" | atomic_write "$LAST_PATH"
 printf '%s\n' "$GRADE_JSON" >> "$HISTORY_PATH"
+
+# The grade landed. Recorded on the happy path too (§4.10) so a fixed credential
+# clears the warning on the next turn instead of leaving a stale one next to a
+# fresh grade.
+write_grader_status "$PROJECT_HASH" "pre" "$TURN" "$TIMESTAMP" "$GRADER_BACKEND" 0 "true"
 
 # Append suggestion if state would be attention or dizzy.
 if command -v jq >/dev/null 2>&1; then

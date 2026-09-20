@@ -110,6 +110,21 @@ public struct SessionDiscovery: Sendable {
         return decoded.projectPath
     }
 
+    // Read the last grader attempt out of a session directory's
+    // grader_status.json (§4.10, issue #92). Returns nil when the file is
+    // absent — every session dir written before this record existed, and every
+    // dir whose first grader attempt has not finished yet. Absence means "no
+    // attempt recorded", never "the grader is fine": the caller shows nothing
+    // extra, exactly as it did before the record existed.
+    //
+    // Read on demand rather than cached: unlike the project path this changes
+    // turn by turn, and it is one small file read per snapshot.
+    public static func graderStatus(inSessionDirectory directory: URL) -> GraderStatus? {
+        let url = directory.appendingPathComponent("grader_status.json")
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(GraderStatus.self, from: data)
+    }
+
     // Display name for an absolute project path: the name of the repository it
     // sits in (issue #42). Walks up from the path to the nearest ancestor that
     // holds a `.git` entry. A `.git` directory names that ancestor. A `.git`
