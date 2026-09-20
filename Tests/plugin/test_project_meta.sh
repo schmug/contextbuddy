@@ -53,7 +53,7 @@ jq -c -n '{
 }' > "$GRADE_FILE"
 
 PRE_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"UserPromptSubmit","prompt":"hello there"}'
-POST_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop","tool_calls":[]}'
+POST_PAYLOAD='{"session_id":"s1","transcript_path":"/nonexistent.jsonl","cwd":"/tmp/p","hook_event_name":"Stop"}'
 
 run_hook() {
   # run_hook <hook> <project_dir> <payload>
@@ -64,10 +64,13 @@ run_hook() {
 # assert_meta <label> <hook> <payload> <project_dir>
 # Runs the hook from <project_dir> and checks the four things the footer row needs:
 # the hook survives, meta.json exists, it parses, and its path round-trips to the
-# directory name. <project_dir> is the exact string project_hash sees as "$PWD".
+# directory name. <project_dir> is the "$PWD" the hook runs under; what gets
+# recorded is its canonical form (issue #4). mktemp hands out /var/folders/...
+# paths, which resolve to /private/var/..., so this also covers a symlinked cwd
+# through the real hook.
 assert_meta() {
   local label="$1" hook="$2" payload="$3" project="$4"
-  local hash session_dir meta recorded rc
+  local hash session_dir meta recorded canonical rc
   hash="$(project_hash "$project")"
   session_dir="$HOME/.claude/inspector/sessions/$hash"
   meta="$session_dir/meta.json"
@@ -82,9 +85,10 @@ assert_meta() {
     || { fail "$label: meta.json is not valid JSON: $(cat "$meta")"; return; }
 
   recorded="$(jq -r '.project_path // empty' "$meta")"
-  [ "$recorded" = "$project" ] \
-    && ok "$label: project_path is the hooked \$PWD" \
-    || fail "$label: project_path is '$recorded', expected '$project'"
+  canonical="$(canonical_project_path "$project")"
+  [ "$recorded" = "$canonical" ] \
+    && ok "$label: project_path is the canonical hooked \$PWD" \
+    || fail "$label: project_path is '$recorded', expected '$canonical'"
   [ "$(project_hash "$recorded")" = "$hash" ] \
     && ok "$label: recorded path hashes back to its own directory name" \
     || fail "$label: project_hash('$recorded') != $hash (path and hash disagree)"

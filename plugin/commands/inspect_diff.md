@@ -7,7 +7,12 @@ You are diffing two ContextBuddy per-turn snapshots. Arguments: `<turn1> <turn2>
 
 ## Steps
 
-1. Resolve `$HOME/.claude/inspector/sessions/<project-hash>/turns/` for the current `$PWD`.
+1. Resolve the session directory for the current `$PWD`, resolving symlinks first so the hash matches the hooks (same rule as `plugin/lib/project_hash.sh`):
+   ```bash
+   PROJECT_HASH=$(printf '%s' "$(cd -P -- "$PWD" 2>/dev/null && pwd -P || printf '%s' "$PWD")" | shasum -a 256 | cut -c1-12)
+   SESSION_DIR="$HOME/.claude/inspector/sessions/$PROJECT_HASH"
+   ```
+   Turn files live in `$SESSION_DIR/turns/`.
 2. Find both turn files. Each turn may have `NNN-pre.json` and/or `NNN-post.json`. Default to `post` if both exist; warn if only one phase is present.
 3. For each of the four scored dimensions, emit:
    ```

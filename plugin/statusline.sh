@@ -36,7 +36,7 @@ LIMIT="$(printf '%s' "$JSON" | jq -r '.tokens_limit // 0')"
 DOMINANT="$(printf '%s' "$JSON" | jq -r '.dominant_signal // empty')"
 
 # Derive color from same logic as StateMachine: loop/context_pressure → orange,
-# any threshold cross → yellow, all-green → green, default → primary.
+# harm or any threshold cross → yellow, all-green → green, default → primary.
 COLOR_RESET='\033[0m'
 COLOR_GREEN='\033[32m'
 COLOR_YELLOW='\033[33m'
@@ -58,6 +58,10 @@ fi
 
 if [ "$DOMINANT" = "loop" ] || [ "$DOMINANT" = "context_pressure" ]; then
   COLOR="$COLOR_ORANGE"
+elif [ "$DOMINANT" = "harm" ]; then
+  # StateMachine maps harm to attention (SPEC §5.2), not dizzy, and clean scores would
+  # otherwise fall through to green below.
+  COLOR="$COLOR_YELLOW"
 elif [ "$CONF" -lt "$CONFIDENCE_THRESHOLD" ] \
   || [ "$ATOM" -lt "$ATOMICITY_THRESHOLD" ] \
   || [ "$DRIFT" -gt "$DRIFT_THRESHOLD" ] \

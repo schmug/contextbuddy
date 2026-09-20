@@ -73,7 +73,7 @@ The two halves communicate exclusively through the file system. The plugin owns 
 
 **Process model**: a single Swift process. Internally, `ContextBuddyCore` is an actor exposing `subscribe() -> AsyncStream<BuddyState>` and `recordFeedback(...)` methods. `ContextBuddyApp` is a thin SwiftUI client that subscribes and renders. This separation makes the watcher extractable into a CLI daemon later if hardware sinks are revisited.
 
-**Discovery and multi-project**: the buddy watches `~/.claude/inspector/sessions/` at the directory level via FSEvents. The plugin writes to `sessions/<project-hash>/`, where `<project-hash>` is `sha256(absolute_project_path)[:12]`. The buddy reflects the most-recently-updated session by default; the right-click menu lists recently-active sessions for explicit pinning.
+**Discovery and multi-project**: the buddy watches `~/.claude/inspector/sessions/` at the directory level via FSEvents. The plugin writes to `sessions/<project-hash>/`, where `<project-hash>` is `sha256(canonical_project_path)[:12]` — the absolute path with symlinks resolved (realpath(3)), so `/tmp/x` and `/private/tmp/x` are one project (issue #4). The buddy reflects the most-recently-updated session by default; the right-click menu lists recently-active sessions for explicit pinning.
 
 **Sandboxing**: do not sandbox in v1. Notarize-only distribution. `LSUIElement = true` (no Dock icon).
 
@@ -126,7 +126,7 @@ contextbuddy/
 │   │   ├── system_prompt.md            # the grader prompt (Opus authors wrapper)
 │   │   └── invoke.sh                   # POSTs to Anthropic API, writes JSON
 │   └── lib/
-│       ├── project_hash.sh             # sha256(absolute_path)[:12]
+│       ├── project_hash.sh             # sha256(realpath(absolute_path))[:12]
 │       ├── session_paths.sh            # resolves all paths from project hash
 │       └── transcript.sh               # sliding window assembly
 └── docs/
@@ -186,7 +186,7 @@ A single grade. Always reflects the most recent grade event (whether `pre` or `p
 - `tokens_used`, `tokens_limit` — integers. Token economics is *measured, not graded*. `tokens_limit` is the session model's context window, resolved per grade by `plugin/lib/context_window.sh` (§5.4), never a constant; `tokens_used ≤ tokens_limit` always holds.
 - `model` — optional string, additive. The session's Claude model id as read from the last non-`<synthetic>` assistant record of the transcript (`claude-fable-5-1`, `claude-haiku-4-5-20251001`), or `null` when no transcript was readable. Not the grader's model (that is `signals.model`).
 - `limit_source` — optional string, additive. Where `tokens_limit` came from: `"override"` (`CONTEXTBUDDY_CONTEXT_WINDOW`), `"autocompact"` (Claude Code's auto-compact window), `"model"` (prefix table), `"observed"` (evidence floor), `"default"` (200000 fallback). See §5.4.
-- `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), or sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), or `null` (no state-changing signal).
+- `dominant_signal` — string. One of `"confidence"`, `"atomicity"`, `"drift"`, `"pollution"` (when a score drove a state change), the sentinel values `"loop"`, `"context_pressure"` (when a non-score signal drove dizzy state), `"harm"` (when `signals.destructive` or `signals.bypass` reached the harm threshold and drove attention state — `typesafe` backend only, §5.4), or `null` (no state-changing signal). The hooks clear any other value to `null` before writing the grade.
 - `summary_update` — the rolling ~200-token summary maintained by the grader. Reflects state after this turn.
 - `signals` — optional object, backend-specific. Emitted by the `typesafe` backend only; absent for `anthropic`, `ollama` and `openai_compatible`. Every field inside is optional and consumers must tolerate new ones (§13). Known fields: `backend`, `model`, `is_task`, `task_gated`, `intent` (`choice`, `probabilities` map, `confidence`), `is_correction`, `destructive`, `bypass`, `severity`, `masses` (`confidence_low`, `atomicity_low`, `drift_high`, `pollution_high`). Surfaced in the popover's "Why this grade" disclosure (§9.3).
   - Note for consumers: the keys of `intent.probabilities` are data, not schema. Swift's `.convertFromSnakeCase` does not rewrite dictionary keys, so they arrive verbatim (`fix_bug`, not `fixBug`).
@@ -234,7 +234,7 @@ Append-only JSONL written by the buddy. One line per ack or mute event.
 {"timestamp": "2026-04-29T11:43:08Z", "turn": 14, "action": "mute", "signal": "atomicity", "scope": "session"}
 ```
 
-`action` is `"ack"` or `"mute"`. `signal` matches the `dominant_signal` field on the grade being ack'd/muted, including the `"loop"` and `"context_pressure"` sentinels. `scope` is `"session"` (mute only this session) or `"persistent"` (mute across all future sessions until cleared) — v1 only emits `"session"`; persistent mute is v2.
+`action` is `"ack"` or `"mute"`. `signal` matches the `dominant_signal` field on the grade being ack'd/muted, including the `"loop"`, `"context_pressure"`, and `"harm"` sentinels. `scope` is `"session"` (mute only this session) or `"persistent"` (mute across all future sessions until cleared) — v1 only emits `"session"`; persistent mute is v2.
 
 ### 4.7 `state.db` (SQLite)
 
@@ -282,15 +282,25 @@ loop_window_turns = 3
 context_pressure_pct = 85   # tokens_used/tokens_limit > this triggers dizzy (limit per §5.4)
 
 [grader]
+backend = "anthropic"       # anthropic | ollama | openai_compatible | typesafe (README "Grader backends")
 model = "claude-haiku-4-5-20251001"
 sliding_window_turns = 3    # last N turns verbatim
 inspect_model = "claude-sonnet-4-6"
 
+[grader.typesafe]           # used when backend = "typesafe" (issue #8)
+api_key_env = "TYPESAFE_API_KEY"     # name of the env var holding the key; the key is never in this file
+endpoint = "https://api.typesafe.ai"
+task_gate = 0.5             # is_task probability (0 to 1) below which the turn is not graded
+harm_action = 0.7           # destructive/bypass probability (0 to 1) treated as actionable
+
 [ui]
-animations_enabled = true
+animations_enabled = true   # false: no icon motion. macOS Reduce Motion has the same effect; the two compose as AND (§9.6)
+token_row_pct = 70          # §9.3 ⚡ row is de-emphasized at or below this percent
 ```
 
-The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required.
+Unknown sections and keys are rejected, and a rejected file falls back to compiled-in defaults as a whole (§13). Adding a key means adding it to `Config.parse` first. `task_gate` and `harm_action` outside 0 to 1, and a `[grader.typesafe].endpoint` that is not `https://` and not a loopback host (`localhost`, `127.0.0.1`, `::1`), are rejected the same way; the hooks substitute the per-key default for the gates and `jev.mjs` refuses the endpoint with exit 2.
+
+The buddy and plugin both read `config.toml` on each grade event. Hot-reload on file change; no restart required. The buddy also checks the file on its 30 s sleep tick, so an edit with no grade in flight lands within one tick.
 
 ### 4.9 `meta.json`
 
@@ -305,7 +315,7 @@ Project identity for the session directory. The project hash is one-way, so this
 
 **Field rules**:
 - `schema_version` — always `1` in v1.
-- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. When path canonicalization lands (issue #4), the canonical string is what gets recorded — there is no second normalization step here.
+- `project_path` — the absolute project path, **byte-identical to the string the hook passed to `project_hash`**. `sha256(project_path)[:12]` must equal the name of the directory this file sits in; if the two disagree, the buddy names a different project than the scores belong to. The hooks pass the canonical (symlink-resolved) path (issue #4), so that is what gets recorded — there is no second normalization step here.
 
 Deliberately *not* a field on `last.json`: project identity is session metadata rather than a graded score, `last.json` is version-gated as the grader's validated output schema (§4.1), and the project name must be correct from turn one rather than only after the first successful grade.
 
@@ -335,7 +345,7 @@ When multiple conditions could fire, precedence is (highest to lowest):
 
 1. `heart` (transient feedback, always wins briefly)
 2. `dizzy` (behavioral red flag)
-3. `attention` (score-driven warning)
+3. `attention` (score-driven warning, or the `harm` sentinel — §5.4)
 4. `celebrate` (positive feedback, transient)
 5. `busy`
 6. `idle`
@@ -356,15 +366,19 @@ Two distinct triggers, both of which set `dominant_signal` to a sentinel value:
 
 The plugin computes both and sets `dominant_signal` accordingly. The grader prompt does not need to know about these — they are mechanical, not semantic.
 
+**Harm (attention, not dizzy).** A third sentinel, `"harm"`, is set by the `typesafe` grader in code (`plugin/grader/jev.mjs mapAnswers`), not by the hooks: when `signals.destructive` or `signals.bypass` is at or above `[grader.typesafe] harm_action` (default `0.7` — the `HARM_ACTION` constant in `jev.mjs`, the guardrails cookbook's "action" threshold), `dominant_signal` is `"harm"` regardless of the four rubric values. The loop and context-pressure overrides above still win. The buddy maps `harm` to `attention` (§5.2), and the hooks append a `harm` section to `suggestions.md` naming which signal reached the threshold and the severity. Harm is typesafe-only, and the hooks enforce it rather than trust it: `"harm"` passes the same `dominant_signal` allowlist as the other six values (§4.1), but is kept only when the grade's own `signals.destructive` or `signals.bypass` is a number at or above the resolved `harm_action`. A grade from any other backend, or a typesafe grade whose signals never cross the threshold, has the sentinel cleared to `null` with a stderr note — LLM graders never see `signals` and are forbidden from emitting `"harm"` (`plugin/grader/system_prompt.md`), so this closes the same prompt-injection gap §4.1's allowlist exists for. Harm is advisory: the hooks exit 0 and nothing blocks or edits the prompt.
+
+**Token usage.** Hook payloads carry no usage either, so `tokens_used` is measured by the hooks from the transcript at `transcript_path`: `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` of the last `type: "assistant"` record carrying `usage` whose model is not `<synthetic>` (`plugin/lib/transcript.sh transcript_window`, the same arithmetic as `grader/jev.mjs parseTranscript`). That count is what the resolver below floors against. No transcript, or none with assistant usage yet, leaves the grader's `tokens_used` standing and the floor is re-applied against it.
+
 **Context window resolution.** Hook payloads carry no model or window, so `tokens_limit` is resolved per grade by `plugin/lib/context_window.sh` (mirrored in `grader/jev.mjs` and `grader/jev_shadow.py`; the prefix table is `plugin/lib/context_windows.json`, read by all three). First hit wins and is recorded as `limit_source` (§4.1):
 
 1. `override` — `CONTEXTBUDDY_CONTEXT_WINDOW` from the environment or a `.env` found by `lib/dotenv.sh`. Accepts `300000` / `300k` / `1m`. Deliberately not a `config.toml` key: the Swift parser drops the whole file on an unknown key (§4.8).
 2. `autocompact` — `CLAUDE_CODE_AUTO_COMPACT_WINDOW`, else `autoCompactWindow` in `${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json` (what `/autocompact` writes), same spellings. The effective ceiling is the compact trigger, not the raw window.
 3. `model` — `message.model` of the last `type: "assistant"` record in `hook.transcript_path` whose model is not `<synthetic>`, mapped by prefix: 1M for `claude-fable-*`, `claude-mythos-*`, `claude-sonnet-5*`, `claude-opus-5*`, `claude-opus-4-8*`, `claude-opus-4-7*`; 200K for `claude-haiku-*`, `claude-sonnet-4-6*`, `claude-opus-4-6*`, `claude-*-4-5*` and anything else (conservative). `CLAUDE_CODE_DISABLE_1M_CONTEXT=1` forces 200K on the 1M rows. `[1m]` variants and gateway aliases are out of scope and rely on step 5.
 4. `default` — no transcript, no model: 200000.
-5. `observed` — evidence floor, applied after 1-4 against the grade's `tokens_used`: a limit below `tokens_used` is raised to the next tier (200K → 1M; past the last tier, to `tokens_used` itself). Never lower the limit below observed usage.
+5. `observed` — evidence floor, applied after 1-4 against the measured `tokens_used`: a limit below `tokens_used` is raised to the next tier (200K → 1M; past the last tier, to `tokens_used` itself). Never lower the limit below observed usage. This is why a 697327-token transcript on a model the table does not know grades against 1M, not 200K: the limit was unknown, not the context full.
 
-The hooks resolve once per grade, print the result on the `## tokens` line the LLM backends copy, embed it in the typesafe job, and stamp `tokens_limit` / `model` / `limit_source` onto the grade before the context-pressure comparison, so all four backends agree. Budget: `tail` plus `jq` over the transcript and `settings.json`; no API calls.
+The hooks resolve once per grade, print the pair on the `## tokens` line the LLM backends copy, embed it in the typesafe job, and stamp `tokens_used` / `tokens_limit` / `model` / `limit_source` onto the grade in one write before the context-pressure comparison, so the four fields can never disagree, `tokens_used ≤ tokens_limit` holds for every grade written, and all four backends agree. Budget: `tail` plus `jq` over the transcript and `settings.json`; no API calls.
 
 ### 5.5 Celebrate consecutive counting
 
@@ -446,10 +460,10 @@ Pollution is graded only on `post` (Stop) phase. On `pre` (UserPromptSubmit) pha
 You will write the grader system prompt as a complete, locked artifact at `plugin/grader/system_prompt.md`. It must:
 
 1. **Embed §6 verbatim** as the rubric definitions. Do not paraphrase, do not condense, do not "improve" the rubric prose. The exact words in §6 are the IP.
-2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), last 3 turns verbatim, prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
+2. **Specify the input context the grader receives**: session.md content, latest prompt (for `pre`) or latest turn including agent response and tool calls (for `post`), the last N typed prompts verbatim (N = `[grader] sliding_window_turns`, default 3, read from the transcript at `transcript_path` as §10.1 describes — typed prompts only, no assistant replies and no tool calls), prior rolling summary, current `tokens_used`/`tokens_limit`, list of files edited in the last 5 turns (for loop pre-detection — the grader does not detect loops itself, but the rationale may reference the pattern).
 3. **Specify the output schema**: must produce JSON conforming to §4.1 exactly. Include a worked output example (use Worked Example 1 from §8 as the canonical example). Strict JSON only — no preamble, no chain-of-thought, no markdown fences around the output.
 4. **Instruct on rationale tone**: concrete, references turns/files, under ~120 chars, action-mappable where possible.
-5. **Instruct on `dominant_signal`**: set to the dimension whose threshold cross drove a state change, OR `null` if no threshold crossed. Do not set to `"loop"` or `"context_pressure"` — those are set mechanically by the plugin, not the grader.
+5. **Instruct on `dominant_signal`**: set to the dimension whose threshold cross drove a state change, OR `null` if no threshold crossed. Do not set to `"loop"`, `"context_pressure"`, or `"harm"` — those are set mechanically by the plugin, not the grader (`harm` only by the typesafe backend from `signals`, which no LLM grader receives).
 6. **Instruct on `summary_update`**: maintain a rolling summary under ~200 tokens that captures session state, recent direction, and any open issues. Update each grade.
 
 The grader prompt should be model-agnostic in structure (so the same prompt works for Haiku and Sonnet) but it will be primarily called against `claude-haiku-4-5-20251001` for `pre`/`post` grades and `claude-sonnet-4-6` for `/inspect` deep dives. The deep-dive variant additionally produces a `deep_analysis` field with multi-paragraph prose; this is a separate output schema and should be documented as a v1 deliverable too.
@@ -609,7 +623,7 @@ Turns 27, 28, 29 all included edits to `src/auth/jwt.ts`. The file has been edit
   "timestamp": "2026-04-29T13:08:51Z",
   "scores": {
     "confidence": {"value": 7, "rationale": "Prompt clear; agent attempting test-driven fix iteration"},
-    "atomicity": {"value": 6, "rationale": "Single action (fix failing test) but third attempt"},
+    "atomicity": {"value": 9, "rationale": "One action with a clear boundary: fix the failing expired-token test in tests/auth/jwt.test.ts"},
     "drift": {"value": 2, "rationale": "Still aligned with auth refactor goal"},
     "pollution": {"value": 5, "rationale": "Three iterations of jwt.ts read + edit cycle accumulated"}
   },
@@ -631,7 +645,7 @@ Note: no individual *score* crossed an attention threshold. Dizzy is triggered b
 🌀 dizzy
 ─────────────
 Confidence  ▓▓▓▓▓▓▓╎░░░  7/10
-Atomicity   ▓▓▓▓▓▓╎░░░░  6/10
+Atomicity   ▓▓▓▓▓▓▓▓▓░░  9/10
 Drift       ▓▓░░░░░╎░░░  2/10
 Pollution   ▓▓▓▓▓░░╎░░░  5/10
 
@@ -686,6 +700,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 - **Routine transitions** (idle ↔ busy) are silent and instantaneous. No motion.
 - **Attention/celebrate/dizzy/heart** transitions are animated. Animation is the attention signal.
 - All animations under 800ms total wall-clock unless the state itself is held (dizzy wiggles continuously while in state; celebrate plays once and ends).
+- The status item is an AppKit `NSStatusItem`, so the effects in §9.1 run as the same SF Symbol effects through `NSImageView.addSymbolEffect` (`.bounce`, `.wiggle`, `.pulse`, `.rotate`) on an image view hosted in the item's button. A one-shot plays once per transition into its state; a snapshot that repeats the state does not replay it.
 
 ### 9.3 Popover
 
@@ -697,11 +712,11 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
   - Horizontal rule
   - Score meters — one row per dimension (see below)
   - Token economics row
-  - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`)
+  - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`; `harm` has no dominant-rationale line yet — its numbers live in the "Why this grade" harm row below, and a synthesized line is deferred)
   - "Why this grade" disclosure, collapsed by default (see below)
   - Action row: `[Ack]  [Mute "<signal>"]  [Open inspector]` (Mute button hidden in celebrate/heart states)
   - Horizontal rule
-  - Project footer row, pinned to the bottom: `📁 <project name>` — the last path component of `project_path` from `meta.json` (§4.9), naming the project the scores belong to. Truncated in the middle, never wrapped. The full absolute path is the row's tooltip only, never rendered inline (it leaks `/Users/<username>/…` into a screenshot-able surface and does not fit 320pt). Falls back to the project-hash prefix when `meta.json` is absent. Distinct from `plugin/statusline.sh`, which is Claude Code's status line (§10.2) and needs no project label.
+  - Project footer row, pinned to the bottom: `📁 <project name>` — the name of the repository `project_path` from `meta.json` (§4.9) sits in, naming the project the scores belong to. The buddy walks up from `project_path` to the nearest ancestor holding a `.git` entry: a `.git` directory names that ancestor; a linked worktree's `.git` file (`gitdir: <main>/.git/worktrees/<name>`) names the main checkout, so a session in `.claude/worktrees/objective-cerf-9a0580` shows `contextbuddy`; any other `.git` file names the directory holding it. With no repository above the path, the name is the last path component. Resolution reads the `.git` entry directly (the buddy never shells out to `git`) and is cached per session hash, never recomputed per snapshot. Truncated in the middle, never wrapped. The recorded `project_path` — not the resolved repository root — is the row's tooltip only, never rendered inline (it leaks `/Users/<username>/…` into a screenshot-able surface and does not fit 320pt). Falls back to the project-hash prefix when `meta.json` is absent. Distinct from `plugin/statusline.sh`, which is Claude Code's status line (§10.2) and needs no project label.
 
 **Score meters.** The four dimensions render as one labelled row each, in §6
 rubric order, replacing the former one-line `conf:N atom:N drift:N pol:N` row.
@@ -752,7 +767,7 @@ backend packs the same digest into it and rendering both repeats every number.
 
 - "Ack current state" (disabled when in `idle`/`sleep`/`busy`)
 - "Mute current signal — this session"
-- "Recent sessions ▶" (submenu listing last 5 project hashes by name, allowing pin-to)
+- "Recent sessions ▶" (submenu listing the last 5 sessions by project name, allowing pin-to). Each item is titled with the project name resolved from the session's `meta.json` (§4.9), the same name as the §9.3 footer row; a session dir with no `meta.json` shows the hash prefix (`abcdef…`), never a blank row. Two visible sessions that resolve to the same name each carry their hash prefix as a suffix (`api (abcdef)`) so the rows stay distinguishable. The item's pin target and its checkmark are keyed on the full hash, never the title.
 - "Open inspector folder"
 - separator
 - "Preferences (edit config.toml)"
@@ -774,6 +789,7 @@ When popover is focused:
 - No Dock icon (`LSUIElement = true`).
 - No window other than the popover.
 - No automatic quit or sleep behavior beyond OS defaults.
+- No motion the user has turned off. `[ui].animations_enabled = false` and the macOS Reduce Motion setting (System Settings > Accessibility > Display) each suppress every §9.1 effect, held and one-shot; the glyph and tint still change. They compose as AND — neither overrides the other — and both take effect without a restart.
 
 ---
 
@@ -786,7 +802,7 @@ When popover is focused:
 - Ensures the session directory exists.
 - Records `meta.json` (§4.9) with that same `$PWD`, atomically. Failure is logged and skipped like any other hook error (§13) — the buddy falls back to the hash.
 - Determines the current turn number: advances `turns/.counter` under the write lock (seeded from the max `turns/NNN-*.json`), so a skipped grade still consumes a number.
-- Assembles grader input: session.md, latest prompt (from hook env), last 3 turns verbatim, prior summary from history.jsonl tail.
+- Assembles grader input: session.md, latest prompt (from hook input), last 3 typed prompts verbatim and `tokens_used` from the JSONL transcript at the hook input's `transcript_path` (the payload itself carries no turns or usage), prior summary from history.jsonl tail.
 - Calls Anthropic Messages API with Haiku model, grader system prompt, assembled input.
 - Parses response JSON. Validates conforms to schema §4.1. On parse failure, log error and skip — do not crash the user's session.
 - Writes `turns/NNN-pre.json` atomically.
@@ -796,7 +812,7 @@ When popover is focused:
 - If state would transition to `attention` or `dizzy`, appends a section to `suggestions.md`.
 
 **`hooks/stop.sh`**: identical pipeline but with phase=`post` (including the `meta.json` write, since a Stop can be the first hook to create the session directory). Additionally:
-- Reads the agent's tool calls from the hook input to extract the list of files edited.
+- Reads this turn's `Edit`/`Write`/`MultiEdit` `tool_use` records — the assistant records after the last typed prompt in the transcript at `transcript_path` — to extract the list of files edited. The hook input carries no tool calls.
 - Maintains a rolling edit history (last 5 turns × edited files) in a small file under `sessions/<hash>/edits.jsonl`.
 - Computes loop detection per §5.4 and overrides `dominant_signal` to `"loop"` if triggered.
 - Writes `turns/NNN-post.json`, updates `last.json`, appends history.
@@ -875,6 +891,8 @@ The buddy and the plugin must each fail gracefully when the other is absent or m
 - **Malformed `last.json`**: buddy logs to stderr, retains previous state, continues watching.
 - **Missing `session.md`**: plugin grader prompt notes its absence; scores produced are advisory but flagged with reduced confidence in rationale ("session.md not found — grading against prompt only").
 - **Anthropic API error (rate limit, timeout)**: plugin logs and skips that grade. No file is written. Buddy state remains as-of-previous-grade.
+- **`transcript_path` missing, unreadable, or not a regular file**: the hook grades with an empty turn window and a transcript `tokens_used` of 0 (the grader's own token fields stand), writes one `contextbuddy:` warning to stderr, exits 0, and still writes the grade.
+- **`jq` missing**: `transcript_window` degrades to the same empty window with a `contextbuddy:` warning and the hook continues; exit 0 in every case. On the default `anthropic` backend the grade is still written, unvalidated, because the §4.1 check and the mechanical `dominant_signal` overrides need jq. `ollama` and `openai_compatible` refuse up front in `grader/invoke.sh` and `typesafe` cannot build its job file, so those grades are logged and skipped.
 - **SQLite corruption**: buddy logs error and recreates state.db with empty tables. Feedback events are lost; state.db is best-effort, not durable contract.
 - **Project hash collision**: vanishingly unlikely with 12-char sha256 prefix. Not handled.
 - **`config.toml` malformed**: plugin and buddy fall back to compiled-in defaults (matching the values in §4.8). Log warning.

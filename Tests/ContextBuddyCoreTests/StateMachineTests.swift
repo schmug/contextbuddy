@@ -137,6 +137,26 @@ final class StateMachineTests: XCTestCase {
         XCTAssertEqual(r.transition?.trigger, "all_clear")
     }
 
+    // MARK: - Harm (issue #7, §5.4)
+
+    func testAttentionOnHarmSentinel() {
+        let g = makeGrade(dominantSignal: .harm)
+        let r = StateMachine.evaluate(prev: .idle, grade: g, history: .empty, cfg: cfg, now: now)
+        XCTAssertEqual(r.state, .attention, "harm is advisory: attention, not dizzy")
+        XCTAssertEqual(r.transition?.trigger, "harm")
+        XCTAssertEqual(r.transition?.dominantSignal, .harm)
+    }
+
+    func testHarmBeatsDimensionCross() {
+        // atomicity 2 crosses too; harm keeps the dominant slot (precedence
+        // above the four rubric dimensions).
+        let g = makeGrade(confidence: 8, atomicity: 2, drift: 1, pollution: 2, dominantSignal: .harm)
+        let r = StateMachine.evaluate(prev: .idle, grade: g, history: .empty, cfg: cfg, now: now)
+        XCTAssertEqual(r.state, .attention)
+        XCTAssertEqual(r.transition?.dominantSignal, .harm)
+        XCTAssertEqual(r.transition?.trigger, "harm")
+    }
+
     // MARK: - Precedence (§5.2)
 
     func testDizzyBeatsAttention() {

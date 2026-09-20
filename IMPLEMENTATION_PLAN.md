@@ -85,10 +85,10 @@ This confirms §3 and proposes three additions (called out inline).
 
 ### `Sources/ContextBuddyCore/`
 
-- **`Schemas.swift`** — `Codable` value types: `Grade` (one per §4.1, used for `last.json`, history lines, and per-turn snapshots — they share a schema), `Score`, `Phase` (`pre`/`post`), `DominantSignal` enum (the four dimensions + `loop` + `context_pressure` + `null`), `FeedbackEvent` (§4.6), `SessionAnchor` (§4.4), `Config` (§4.8), `EditRecord` (for `edits.jsonl`, see §3 addition #1). Decoding ignores unknown fields (§4 rule). Phase-aware: `pollution` rationale prefix `"(carried from turn N)"` is data, not parsed specially.
+- **`Schemas.swift`** — `Codable` value types: `Grade` (one per §4.1, used for `last.json`, history lines, and per-turn snapshots — they share a schema), `Score`, `Phase` (`pre`/`post`), `DominantSignal` enum (the four dimensions + `loop` + `context_pressure` + `harm` + `null`), `FeedbackEvent` (§4.6), `SessionAnchor` (§4.4), `Config` (§4.8), `EditRecord` (for `edits.jsonl`, see §3 addition #1). Decoding ignores unknown fields (§4 rule). Phase-aware: `pollution` rationale prefix `"(carried from turn N)"` is data, not parsed specially.
 - **`Watcher.swift`** — Wraps `FSEventStreamCreate` watching `~/.claude/inspector/sessions/`. Emits `(projectHash, lastJsonURL)` events. Debounces ~50 ms to coalesce atomic-rename pairs (write-temp + rename triggers two events). Re-parses `last.json` on each event; ignores partial/malformed reads.
 - **`StateMachine.swift`** — Pure function `nextState(prev: BuddyState, grade: Grade, history: StateHistory, cfg: Config) -> Transition`. Implements §5 precedence and the celebrate consecutive-counter (lives in `StateHistory`). `heart` is set imperatively from `Core.recordFeedback(.ack, …)` and decays on a timer; the state machine here only handles grade-driven transitions.
-- **`SessionDiscovery.swift`** — Computes `sha256(absolute_path)[:12]`. Lists `sessions/*/last.json` by mtime for MRU. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`.
+- **`SessionDiscovery.swift`** — Computes `sha256(canonicalProjectPath(path))[:12]`, where `canonicalProjectPath(_:)` resolves symlinks with realpath(3) (same precedent as `Watcher.canonicalize`) and returns the input verbatim when it cannot be resolved. Lists `sessions/*/last.json` by mtime for MRU, falling back to the session directory's mtime for sessions that have no grade yet. Resolves "current session" as MRU unless explicitly pinned via `Core.pin(projectHash:)`. Resolves the footer row's project name (§9.3) by walking up from the recorded `project_path` to the nearest `.git` entry: a `.git` directory names that ancestor, a worktree's `.git` file (`gitdir: <main>/.git/worktrees/<name>`) names the main checkout, no repository above the path means the last path component; never shells out to `git`, and `BuddyCore` caches the name per session hash next to the path.
 - **`Storage.swift`** — SQLite wrapper around `state.db` (§4.7). Two writers: `recordFeedback` and `recordTransition`. Auto-creates schema. On `SQLITE_CORRUPT` or open failure, deletes file and recreates (§13). No reads in v1 — but expose `enumerateFeedback`/`enumerateTransitions` for the test suite to verify writes.
 - **`Core.swift`** — `public actor BuddyCore`. Composes the above. API:
   - `subscribe() -> AsyncStream<BuddyState>`
@@ -96,14 +96,14 @@ This confirms §3 and proposes three additions (called out inline).
   - `pinSession(_ hash: String?) async`
   - `currentSnapshot() async -> BuddySnapshot` (state + last grade + token usage; consumed by popover)
   - Owns the `heart` timer; reverts to grade-derived state when timer fires.
-  - Hot-reloads `config.toml` on change (FSEvents on the file path).
+  - Hot-reloads `config.toml` by mtime check (`reloadConfigIfChanged`) on each grade event and on the 30 s sleep tick, so a `[ui]` edit lands within one tick with no grade in flight. `config` is private to the actor; `Snapshot.thresholds` and `Snapshot.ui` carry the live values out, and a config-only change broadcasts a snapshot on its own (#46, #36).
 
 ### `Sources/ContextBuddyApp/`
 
 - **`ContextBuddyApp.swift`** — `@main` SwiftUI `App` with a single `MenuBarExtra` (or `Settings { EmptyView() }` + `MenubarController`; see §6 risk). Owns one `BuddyCore` instance.
-- **`MenubarController.swift`** — `NSStatusItem` lifecycle, button image binding, popover anchoring, right-click menu construction (§9.4), Recent Sessions submenu populated from `SessionDiscovery`.
-- **`PopoverView.swift`** — Header (state + glyph), monospaced score row, optional token-economics row (only when `tokens_used/tokens_limit > 0.70` — note: this 0.70 is a **hard-coded UI constant**, not a config knob; flagged in §5 open questions), dominant rationale, action row. Hides "Mute" in `celebrate`/`heart` (§9.3).
-- **`IconRendering.swift`** — `state -> (SFSymbolName, Tint, AnimationPolicy)`. Implements the §9.1 mapping. One-shot vs continuous animation handled here (uses `.symbolEffect(.bounce)` / `.wiggle, options: .repeating)` / `.pulse`). Honors `[ui].animations_enabled = false` by suppressing all motion.
+- **`MenubarController.swift`** — `NSStatusItem` lifecycle, button image binding, popover anchoring, right-click menu construction (§9.4), Recent Sessions submenu populated from `SessionDiscovery`. Submenu items are titled by `SessionRef.projectName` (the §9.3 repository-root name), fall back to the 6-char hash prefix plus `…` when the session has no `meta.json`, and append the hash prefix (`api (abcdef)`) when two visible sessions resolve to one name; `representedObject` stays the full hash, which `menuPinSession(_:)` and the checkmark key on. `recentSessionItems(for:pinnedHash:)` / `recentSessionTitles(for:)` are static so `Tests/ContextBuddyAppTests/RecentSessionsMenuTests.swift` pins the rule without a `BuddyCore`.
+- **`PopoverView.swift`** — Header (state + glyph), monospaced score row, token-economics row (always rendered, de-emphasized at or below `[ui].token_row_pct` — Q7, default 70; the value reaches the view as `Snapshot.ui.tokenRowPct`, #36), dominant rationale, action row. Hides "Mute" in `celebrate`/`heart` (§9.3).
+- **`IconRendering.swift`** — `IconStyle`: `state -> (SFSymbolName, Tint, AnimationPolicy)`, the §9.1 mapping. `StatusItemIcon.apply` is the one rendering path for the status item: it installs a `StatusIconImageView` (an `NSImageView`) in `NSStatusItem.button` on first call and runs the §9.1 effects on it through `NSImageView.addSymbolEffect` (`.bounce` / `.wiggle, .repeating` / `.pulse` / `.rotate, .repeating`). One-shot vs held is decided in `StatusIconImageView.render`: a one-shot starts on the transition into its state only, a snapshot that repeats the state is a no-op, a held effect runs until the state ends. The button's own `image` stays nil, so the item is created at the fixed `StatusItemIcon.length` rather than `variableLength`. Suppresses all motion when its `animationsEnabled` argument is false. `MenubarController.renderIcon` passes `StatusItemIcon.animationsEnabled(ui:reduceMotion:)`: `Snapshot.ui.animationsEnabled` ANDed with `NSWorkspace.accessibilityDisplayShouldReduceMotion`, which the controller re-reads on `accessibilityDisplayOptionsDidChangeNotification` so a Reduce Motion toggle re-renders without a restart (#36). (#35)
 - **`KeyboardShortcuts.swift`** — Local `NSEvent` monitor while popover is key: `A`/`M`/`I` per §9.5.
 
 ### `Tests/ContextBuddyCoreTests/`
@@ -125,7 +125,7 @@ This confirms §3 and proposes three additions (called out inline).
 - **`statusline.sh`** — Reads `last.json`, prints one line in <50 ms, colored leading dot per §10.2. No API calls. No process spawn beyond `cat`/`jq`.
 - **`grader/system_prompt.md`** — The grader prompt I will author. Embeds §6 verbatim, specifies input bundle (§7.2), output schema with Worked Example 1 as the canonical example (§7.3), tone rules (§7.4), `dominant_signal` rules (§7.5 — grader never emits `loop`/`context_pressure`), and `summary_update` rules (§7.6). A second variant (or sibling file `inspect_system_prompt.md`) defines the deep-dive output schema for `/inspect` — see open question Q5.
 - **`grader/invoke.sh`** — POSTs to Anthropic Messages API, parses strict JSON, retries once on transient error, fails silently on 4xx. Reads API key from `ANTHROPIC_API_KEY` env (open question Q4).
-- **`lib/project_hash.sh`** — `printf '%s' "$PWD" | shasum -a 256 | cut -c1-12`. macOS-native (no GNU `sha256sum` dep).
+- **`lib/project_hash.sh`** — `canonical_project_path` (`CDPATH= cd -P && pwd -P`, verbatim fallback) then `printf '%s' "$canonical" | shasum -a 256 | cut -c1-12`. Must agree with the Swift hash for the same directory; both sides pin `sha256("/private/tmp")[:12]` in tests. macOS-native (no GNU `sha256sum` dep).
 - **`lib/session_paths.sh`** — All path helpers derive from `$PROJECT_HASH`. One source of truth.
 - **`lib/transcript.sh`** — Sliding-window assembly. Reads `history.jsonl` tail for prior summary; reads last 3 turns from `turns/` directory verbatim (open question Q6: what does "verbatim" mean given we only have grade JSON, not raw prompts/responses?).
 
@@ -164,6 +164,7 @@ Each row below is one test. State machine is pure → table-driven `XCTest` with
 | Celebrate auto-decays after ~2.5 s | (use injectable clock) | reverts to derived state |
 | Dizzy on `dominant_signal == "loop"` | grade with sentinel | state == `dizzy` |
 | Dizzy on `dominant_signal == "context_pressure"` | grade with sentinel | state == `dizzy` |
+| Attention on `dominant_signal == "harm"` (issue #7) | grade with sentinel, any scores | state == `attention`, dominant == `harm` |
 | Dizzy clears when neither signal present | prev=dizzy, fresh grade with null | state == `idle` |
 | Heart wins precedence | prev=attention, ack fired | state == `heart` for ~3 s |
 | Heart reverts to derived state | after timer | state == grade-derived |
@@ -189,10 +190,11 @@ Each row below is one test. State machine is pure → table-driven `XCTest` with
 ### `SessionDiscoveryTests.swift`
 
 - `projectHash("/abs/path")` is deterministic and 12 hex chars.
-- Two distinct paths produce different hashes (no collision in fixture set of 100 random paths).
-- MRU returns sessions ordered by `last.json` mtime.
+- Two distinct directories produce different hashes; two spellings of one directory (a symlink and its target) produce the same hash (`testProjectHashResolvesSymlinksBeforeHashing`); an unresolvable path is hashed verbatim (`testProjectHashHashesUnresolvablePathVerbatim`).
+- MRU returns sessions ordered by `last.json` mtime; a session with no `last.json` yet orders by its directory mtime instead.
 - Pinned session overrides MRU.
 - Empty `~/.claude/inspector/sessions/` → empty MRU, no error.
+- Project name resolves to the git root, against fabricated `.git` fixtures rather than `git init`: a `.git` directory names the checkout even from a cwd below it (`testProjectNameIsTheCheckoutNameInAPlainRepo`); a worktree's `gitdir:` pointer file, absolute or relative, names the main checkout (`testProjectNameInAWorktreeIsTheMainCheckoutName`); a path with no repository above it, whether or not it still exists on disk, and a garbage or empty `.git` file all fall back to the last path component (`testProjectNameFallsBackToLastPathComponentOutsideAnyRepo`).
 
 ### `StorageTests.swift`
 
@@ -213,8 +215,8 @@ Eight phases. Each phase ends with a green test run (where applicable) and is in
 3. **Phase C — Storage + tests** *(small)*. SQLite wrapper, corruption recovery.
 4. **Phase D — Watcher + SessionDiscovery + tests** *(medium)*. FSEvents, debounce, project-hash, MRU. End of phase D: `ContextBuddyCore` is feature-complete and fully tested.
 5. **Phase E — Core actor + integration tests** *(small)*. Wires Watcher → StateMachine → Storage and exposes the public API. Smoke test: drop a fixture `last.json` into a temp dir, observe `BuddyState` stream.
-6. **Phase F — Menubar plumbing** *(medium)*. `NSStatusItem`, icon rendering, glyph swap on state change. No popover yet — verify by visual smoke (state changes flip the icon). Manual verification only (§15).
-7. **Phase G — Popover + keyboard + right-click menu** *(medium-large)*. Full §9 contract. Manual verification.
+6. **Phase F — Menubar plumbing** *(medium)*. `NSStatusItem`, icon rendering, glyph swap on state change. The glyph and its §9.1 motion are the image view `StatusItemIcon.apply` hosts in the item's button; `Tests/ContextBuddyAppTests/StatusItemIconTests.swift` pins tint, glyph and the once-per-transition rule, and whether the effects visibly play is a visual smoke check (state changes flip the icon; busy rotates, dizzy wiggles). No popover yet. Manual verification for the motion (§15).
+7. **Phase G — Popover + keyboard + right-click menu** *(medium-large)*. Full §9 contract. The hosted image view stays out of hit-testing, so left-click (popover) and right-click (menu) still reach the status item's button. Manual verification.
 8. **Phase H — Plugin scripts + grader prompt** *(large)*. Bash hooks, status line, slash commands, grader system prompt with §6 verbatim, `invoke.sh`. End-to-end smoke test inside Claude Code.
 9. **Phase I — Integration + release** *(small-medium)*. End-to-end manual run of all three §8 worked examples. `scripts/release.sh`. README.
 
@@ -336,7 +338,7 @@ Resolutions to §5 Open Questions and §6 R13, recorded after plan approval.
 | R13 §9.3 | Configurable per Q7 (was previously framed as hard-coded). |
 | Q13 | §5.5 says celebrate fires on "all four scores ≥7", but §8.2 (canonical example) fires celebrate with `drift=1` and `pollution=3` — those dimensions are inverted (low = good per §6 rubric). **Decision (post-review confirmation): celebrate zone is confidence/atomicity ≥ 7 AND drift/pollution ≤ 3.** Locked in `StateMachine.highSideThreshold` / `lowSideThreshold`. |
 | §15 / minimum macOS | Bumped from macOS 14 to **macOS 15** so that `.symbolEffect(.wiggle, .repeating)` per §9.1 works literally (no fallback). §15 forbade fallbacks for older macOS; bumping the minimum satisfies both rules. `Package.swift` and tools-version updated accordingly. |
-| §9.1 animations (post-review) | All seven state animations now use the §9.1-literal SF Symbol effects: `.bounce` for attention's "300ms scale pulse" (closest scale-flavored one-shot), `.bounce` for celebrate, `.wiggle, .repeating` for dizzy, `.pulse` for heart, `.rotate, .repeating` for busy. |
+| §9.1 animations (post-review) | All seven state animations now use the §9.1-literal SF Symbol effects: `.bounce` for attention's "300ms scale pulse" (closest scale-flavored one-shot), `.bounce` for celebrate, `.wiggle, .repeating` for dizzy, `.pulse` for heart, `.rotate, .repeating` for busy. They run through AppKit (`NSImageView.addSymbolEffect`) on the image view hosted in the status item's button: the SwiftUI `symbolEffect` view that first carried them was never hosted, so nothing moved until #35. |
 | Q4 (re-resolved) | The Claude Code-managed credential is **not accessible to subprocess hooks**. `claude --bare` (the only flag set that gives an isolated, non-recursive grader call) explicitly requires `ANTHROPIC_API_KEY` and refuses to read OAuth/keychain. **Decision: invoke.sh requires `ANTHROPIC_API_KEY`** and skips grading with a clear error message when absent, per §13's "log and skip" pattern. The original Q4 answer ("use Claude Code managed credential") is not implementable; users must set the env var to enable grading. |
 | Q4 (issue #13, 2026-09-18) | Superseded again. Grading now runs `claude -p` as a **second Claude account** selected by `CLAUDE_CONFIG_DIR`, resolved from `CONTEXTBUDDY_CLAUDE_CONFIG_DIR` (env, then `.env` via `lib/dotenv.sh`). `ANTHROPIC_API_KEY` is removed from the child env (in `-p` mode the key would override the login). No `config.toml` key: `Config.parse` rejects unknown keys and drops the whole file to defaults. Dispatch test: `Tests/plugin/test_invoke_config_dir.sh`. |
 | MenubarController init | Refactored to async factory `MenubarController.create()` invoked from `AppDelegate.applicationDidFinishLaunching`. Removed the `DispatchSemaphore` blocking init pattern that was both a Swift 6 data race and a deadlock risk. |

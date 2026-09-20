@@ -36,6 +36,7 @@ stage() {
   }' > "$SESSION_DIR/last.json"
 }
 render() { ( cd "$TMP/project" && bash "$STATUSLINE" 2>/dev/null ) | sed 's/\x1b\[[0-9;]*m//g'; }
+render_raw() { ( cd "$TMP/project" && bash "$STATUSLINE" 2>/dev/null ); }
 
 stage 176474 1000000
 out="$(render)"
@@ -56,6 +57,14 @@ case "$out" in *"⚡900/200k"*) ok "sub-thousand counts print in full: $out" ;; 
 stage 176474 1000000 context_pressure
 out="$(render)"
 case "$out" in *"conf:8 atom:7 drift:2 pol:3"*) ok "scores still rendered" ;; *) fail "scores: got '$out'" ;; esac
+
+# harm maps to attention (yellow), not dizzy (orange) or green, even with clean scores
+# (issue #7 hardening: StateMachine treats harm as attention, SPEC §5.2/§10.2).
+stage 47823 200000 harm
+raw="$(render_raw)"
+case "$raw" in *$'\033[33m'*) ok "harm renders yellow despite clean scores" ;; *) fail "harm color: got '$raw'" ;; esac
+case "$raw" in *$'\033[38;5;208m'*) fail "harm rendered orange (dizzy), not attention" ;; *) ok "harm not rendered orange" ;; esac
+case "$raw" in *$'\033[32m'*) fail "harm rendered green" ;; *) ok "harm not rendered green" ;; esac
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
