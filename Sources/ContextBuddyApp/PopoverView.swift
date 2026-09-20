@@ -23,6 +23,7 @@ struct PopoverView: View {
         VStack(alignment: .leading, spacing: 8) {
             header
             Divider()
+            graderStatusRow
             scoreSection
             if let grade = snapshot.lastGrade, grade.tokensLimit > 0 { tokenRow(grade) }
             if let line = dominantLine {
@@ -38,6 +39,43 @@ struct PopoverView: View {
         }
         .padding(12)
         .frame(width: 320)
+    }
+
+    // Grader-status row (§4.10, issue #92). Rendered only when the last grader
+    // attempt failed, above the scores rather than in place of them.
+    //
+    // Deliberately not folded into the "no grade yet" placeholder. The failure
+    // that actually hides is a credential that dies AFTER a healthy session:
+    // last.json still holds a good grade, the meters still render, and the
+    // popover looks entirely fine while nothing is being graded any more. A row
+    // that only appeared when there were no scores would miss exactly that case.
+    //
+    // Orange, not red, and no icon change: this is the `attention` hue family
+    // (§9.1), and the buddy stays peripheral and quiet (§9.6). The fixed detail
+    // sentence sits in the tooltip; the row itself names backend and reason only.
+    @ViewBuilder
+    private var graderStatusRow: some View {
+        if let status = snapshot.graderStatus, status.isFailure {
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                Text("⚠︎")
+                    .font(.system(size: 11))
+                Text(status.summaryLine)
+                    .font(.system(size: 11))
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+            }
+            .foregroundStyle(Color.orange)
+            .help(graderStatusTooltip(status))
+        }
+    }
+
+    private func graderStatusTooltip(_ status: GraderStatus) -> String {
+        var lines = [status.detail ?? status.summaryLine]
+        if let phase = status.phase {
+            lines.append("Last attempt: turn \(status.turn) · \(phase.rawValue) · \(status.timestamp)")
+        }
+        lines.append("Recorded in the session's grader_status.json. The scores above, if any, predate this.")
+        return lines.joined(separator: "\n")
     }
 
     // Project footer row (§9.3). Names the project the scores belong to, so a

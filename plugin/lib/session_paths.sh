@@ -47,6 +47,12 @@ suggestions_md_path() {
   printf '%s/suggestions.md' "$(session_dir "$1")"
 }
 
+grader_status_path() {
+  # Last grader attempt for this session (SPEC.md §4.10, issue #92). Written by
+  # lib/grader_status.sh on every attempt, grade or no grade.
+  printf '%s/grader_status.json' "$(session_dir "$1")"
+}
+
 turns_dir() {
   printf '%s/turns' "$(session_dir "$1")"
 }
