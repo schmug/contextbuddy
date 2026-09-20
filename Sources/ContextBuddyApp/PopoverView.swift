@@ -393,7 +393,11 @@ struct ScoreMeterRow: View {
 
     private var color: Color {
         switch meter.status {
-        case .crossed: return .orange   // matches the attention icon tint, §9.1
+        // §9.1's orange and yellow hue families. Not the menubar tints
+        // themselves: those carry a light-appearance variant darkened to clear
+        // 4.5:1 against the menu bar (§9.1, #44), and the popover's background
+        // is not the menu bar. These two have not been measured against it.
+        case .crossed: return .orange
         case .near: return .yellow
         case .ok: return .secondary
         }

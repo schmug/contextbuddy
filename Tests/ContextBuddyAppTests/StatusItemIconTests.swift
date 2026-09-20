@@ -61,21 +61,50 @@ final class StatusItemIconTests: XCTestCase {
         }
     }
 
-    // idle and busy are what the user sees ~99% of the time, so both must clear
-    // AA on either bar. sleep is `.secondary` by contract — deliberately dimmed
-    // — and is held to the 3:1 large-text/UI-component floor instead.
+    // The same floors on the light menu bar, which is where #44 lived: §9.1's
+    // plain `.systemOrange`/`.systemYellow`/`.systemPink` measured 1.38:1 to
+    // 3.34:1 against a near-white bar, `celebrate` close to invisible. §9.1 now
+    // names a darkened light-appearance variant for each, and this is the
+    // assertion those variants exist to satisfy.
     //
-    // The chromatic states are absent on purpose: §9.1's orange, yellow and
-    // pink cannot clear 4.5:1 against a near-white bar (1.38:1 to 3.34:1) and
-    // only different tints would fix that, which §9.1 forbids. See #44.
-    func testAdaptiveTintsClearTheirFloorsOnBothMenuBars() {
-        for (state, floor) in [(BuddyState.idle, 4.5), (.busy, 4.5), (.sleep, 3.0)] {
-            for (appearance, background) in Self.menuBars {
-                let ratio = tintContrast(state, appearance: appearance, background: background)
+    // sleep is the one exception: `.secondary` by contract — deliberately
+    // dimmed, and the only state whose message is "nothing is happening" — so
+    // it is held to the 3:1 non-text/UI-component floor instead of 4.5:1.
+    // Measured 3.88:1.
+    func testEveryTintClearsItsFloorOnTheLightMenuBar() {
+        for state in BuddyState.allCases {
+            let floor = state == .sleep ? 3.0 : 4.5
+            let ratio = tintContrast(state, appearance: .aqua, background: Self.lightMenuBar)
+            XCTAssertGreaterThanOrEqual(
+                ratio, floor,
+                "\(state.rawValue) on the light menu bar: \(Colorimetry.f(ratio)):1, "
+                + "floor \(Colorimetry.f(floor)):1"
+            )
+        }
+    }
+
+    // Darkening orange, yellow and pink far enough to clear 4.5:1 against a
+    // near-white bar drags all three toward brown, and a fix that buys
+    // luminance by making the three chromatic states read alike has not fixed
+    // anything — hue is how a glance tells them apart. §9.1's light variants
+    // are pinned at least 20 degrees apart; measured 25.6 degrees for the
+    // closest pair (attention/celebrate) and 67.3 for the widest
+    // (celebrate/heart). The dark bar keeps §9.1's system colors and is not
+    // asserted here: its gap is a property of macOS, not of this repo.
+    //
+    // dizzy is absent because §9.1 gives it attention's orange on purpose.
+    func testChromaticTintsStayMutuallyDistinguishableOnTheLightMenuBar() {
+        let distinct: [BuddyState] = [.attention, .celebrate, .heart]
+        for (index, first) in distinct.enumerated() {
+            for second in distinct[(index + 1)...] {
+                let apart = Colorimetry.hueDistance(
+                    hue(of: IconStyle.style(for: first, animationsEnabled: false).tint, in: .aqua),
+                    hue(of: IconStyle.style(for: second, animationsEnabled: false).tint, in: .aqua)
+                )
                 XCTAssertGreaterThanOrEqual(
-                    ratio, floor,
-                    "\(state.rawValue) on the \(appearance.rawValue) menu bar: "
-                    + "\(Colorimetry.f(ratio)):1, floor \(Colorimetry.f(floor)):1"
+                    apart, 20,
+                    "\(first.rawValue) and \(second.rawValue) are only "
+                    + "\(Colorimetry.f(apart)) degrees apart in hue on the light menu bar"
                 )
             }
         }
@@ -87,11 +116,14 @@ final class StatusItemIconTests: XCTestCase {
     // 3% at 1x, 2x and 4x). Thinnest in the set is `circle.dotted` at 0.032.
     func testEveryStateDrawsEnoughInkToBeVisible() {
         for state in BuddyState.allCases {
-            let coverage = render(state, appearance: .darkAqua, background: Self.darkMenuBar).inkCoverage
-            XCTAssertGreaterThan(
-                coverage, 0.015,
-                "\(state.rawValue) paints only \(Colorimetry.f(coverage * 100))% of the button"
-            )
+            for (appearance, background) in Self.menuBars {
+                let coverage = render(state, appearance: appearance, background: background).inkCoverage
+                XCTAssertGreaterThan(
+                    coverage, 0.015,
+                    "\(state.rawValue) on \(appearance.rawValue) paints only "
+                    + "\(Colorimetry.f(coverage * 100))% of the button"
+                )
+            }
         }
     }
 

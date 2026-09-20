@@ -2,6 +2,7 @@ import AppKit
 import ContextBuddyCore
 
 // Maps BuddyState to (SFSymbol name, tint, animation policy) per §9.1.
+// The three chromatic tints are appearance-dependent — see `orange` below.
 // Animation policy is owned here so StatusIconImageView can mirror it without
 // re-deciding. `animationsEnabled` is `[ui].animations_enabled` ANDed with the
 // system Reduce Motion switch — StatusItemIcon.animationsEnabled(ui:reduceMotion:)
@@ -18,18 +19,85 @@ enum IconStyle {
             return Style(symbol: "circle.dotted", tint: .labelColor,
                          animation: animationsEnabled ? .rotateRepeating : .none)
         case .attention:
-            return Style(symbol: "exclamationmark.triangle", tint: .systemOrange,
+            return Style(symbol: "exclamationmark.triangle", tint: orange,
                          animation: animationsEnabled ? .scalePulseOnce : .none)
         case .celebrate:
-            return Style(symbol: "sparkles", tint: .systemYellow,
+            return Style(symbol: "sparkles", tint: yellow,
                          animation: animationsEnabled ? .bounceOnce : .none)
         case .dizzy:
-            return Style(symbol: "exclamationmark.arrow.circlepath", tint: .systemOrange,
+            return Style(symbol: "exclamationmark.arrow.circlepath", tint: orange,
                          animation: animationsEnabled ? .wiggleRepeating : .none)
         case .heart:
-            return Style(symbol: "heart.fill", tint: .systemPink,
+            return Style(symbol: "heart.fill", tint: pink,
                          animation: animationsEnabled ? .pulseOnce : .none)
         }
+    }
+
+    // §9.1's three chromatic tints, each a dynamic color: the system color the
+    // SPEC names on a dark menu bar, a darkened variant of the same hue family
+    // on a light one.
+    //
+    // The plain `.system*` colors are only legible on a dark bar. Resolved and
+    // composited over sRGB grey 0.96 they measure 2.11:1 (orange), 1.38:1
+    // (yellow) and 3.34:1 (pink) — `celebrate` all but invisible — against the
+    // 4.5:1 floor §9.1 now commits to (#44). The light values below measure
+    // 4.79:1, 4.82:1 and 5.27:1 and stay at least 25.6 degrees apart in hue,
+    // so darkening does not collapse the three states into one brown glyph;
+    // StatusItemIconTests pins both properties.
+    //
+    // Each hex is sRGB and round-trips through the generic RGB space AppKit
+    // rasterizes into unchanged. A more saturated pink (0xD80048) clipped
+    // there and rendered 7 degrees off its declared hue, failing the
+    // rendered-hue test. Re-check that round trip before raising saturation.
+    static var orange: NSColor { Tints.shared.orange }
+    static var yellow: NSColor { Tints.shared.yellow }
+    static var pink: NSColor { Tints.shared.pink }
+
+    // One instance, built once, so each accessor above hands back the *same*
+    // NSColor every call. IconStyle.Style is Equatable and
+    // StatusIconImageView.render compares the incoming style against the
+    // current one to tell a state transition from a redundant snapshot (§9.2);
+    // a fresh dynamic NSColor per call never compares equal, which would
+    // remove and re-add the held effect on every snapshot and make dizzy's
+    // wiggle visibly restart.
+    //
+    // A holder rather than three `nonisolated(unsafe) static let`s: NSColor is
+    // Sendable on the macOS 26 SDK and not on the macos-15 CI runner's, so the
+    // annotation warns on one and is required on the other (#43, #46). This
+    // compiles clean on both. The stored properties are immutable and AppKit
+    // resolves a dynamic color per drawing appearance on whatever thread
+    // draws, which is what `@unchecked` is asserting.
+    private final class Tints: @unchecked Sendable {
+        static let shared = Tints()
+        let orange = adaptive("contextbuddy.attention", light: 0xB1_50_00) { .systemOrange }
+        let yellow = adaptive("contextbuddy.celebrate", light: 0x7B_6C_00) { .systemYellow }
+        let pink = adaptive("contextbuddy.heart", light: 0xC4_20_48) { .systemPink }
+    }
+
+    // `bestMatch` rather than a raw name comparison so the high-contrast and
+    // vibrant appearances resolve to the variant they are derived from instead
+    // of silently falling through to the light branch.
+    //
+    // `dark` is a closure, not an NSColor: the provider may be `@Sendable` on
+    // some SDKs, and a captured NSColor is not. Nothing non-Sendable crosses
+    // into it.
+    private static func adaptive(
+        _ name: String,
+        light: UInt32,
+        dark: @escaping @Sendable () -> NSColor
+    ) -> NSColor {
+        NSColor(name: NSColor.Name(name)) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark() : srgb(light)
+        }
+    }
+
+    // 0xRRGGBB in sRGB. Pinned to sRGB, not the generic/calibrated space, so
+    // the measured contrast ratios above are the ones that actually ship.
+    private static func srgb(_ hex: UInt32) -> NSColor {
+        NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+                green: CGFloat((hex >> 8) & 0xFF) / 255,
+                blue: CGFloat(hex & 0xFF) / 255,
+                alpha: 1)
     }
 
     struct Style: Equatable {
