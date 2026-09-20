@@ -690,10 +690,53 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 | `sleep` | `moon.zzz` | `.secondary` (dimmed) | none |
 | `idle` | `circle` | `.primary` | none |
 | `busy` | `circle.dotted` | `.primary` | subtle rotation, indefinite |
-| `attention` | `exclamationmark.triangle` | `.orange` | 300ms scale pulse on transition (one-shot) |
-| `celebrate` | `sparkles` | `.yellow` | `.symbolEffect(.bounce)`, ~2.5s |
-| `dizzy` | `exclamationmark.arrow.circlepath` | `.orange` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
-| `heart` | `heart.fill` | `.pink` | `.symbolEffect(.pulse)` once, hold ~3s |
+| `attention` | `exclamationmark.triangle` | `.orange` — `.systemOrange` on a dark menu bar, `#B15000` on a light one | 300ms scale pulse on transition (one-shot) |
+| `celebrate` | `sparkles` | `.yellow` — `.systemYellow` on a dark menu bar, `#7B6C00` on a light one | `.symbolEffect(.bounce)`, ~2.5s |
+| `dizzy` | `exclamationmark.arrow.circlepath` | `.orange`, the same pair as `attention` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
+| `heart` | `heart.fill` | `.pink` — `.systemPink` on a dark menu bar, `#C42048` on a light one | `.symbolEffect(.pulse)` once, hold ~3s |
+
+**Contrast floor.** Every tint clears WCAG 4.5:1 against the menu bar in both
+appearances. `sleep` is the one exception: it is `.secondary` by contract —
+deliberately dimmed, and the only state whose message is "nothing is
+happening" — so it is held to the 3:1 non-text floor instead.
+
+That is why the three chromatic tints are appearance-dependent rather than the
+single system color each row used to name. `.systemOrange`, `.systemYellow`
+and `.systemPink` are legible on a dark bar and not on a light one: resolved
+and composited over sRGB grey 0.96 they measure 2.11:1, 1.38:1 and 3.34:1,
+with `celebrate` effectively invisible. The light-appearance hex values above
+are darkened variants of the same hue families, chosen so the three chromatic
+states stay at least 20 degrees apart in hue — darkening orange, yellow and
+pink far enough to clear 4.5:1 pulls all three toward a common brown, and
+three states that read alike are not a fix. Measured on the resolved tint,
+composited at its own alpha over sRGB grey 0.11 (dark bar) and 0.96 (light
+bar):
+
+| State | dark bar | light bar |
+|---|---|---|
+| `sleep` | 5.95:1 | 3.88:1 |
+| `idle` / `busy` | 12.46:1 | 13.96:1 |
+| `attention` / `dizzy` | 7.63:1 | 4.79:1 |
+| `celebrate` | 12.06:1 | 4.82:1 |
+| `heart` | 4.84:1 | 5.27:1 |
+
+Light-appearance hue separation: 25.6 degrees between `attention` and
+`celebrate`, 41.8 between `attention` and `heart`, 67.3 between `celebrate`
+and `heart`.
+
+Two constraints on anyone changing these values:
+
+- Contrast is a property of the tint, not of the rendered glyph. An
+  alpha-weighted mean over a thin stroke is dominated by partially covered
+  edge pixels and measures the rasterizer rather than the color — the same
+  glyph reads 1.73:1 at 1x and 6.76:1 at 2x. Assert the floor on the resolved
+  tint, and assert glyph ink coverage separately so a legible tint cannot ship
+  as an invisible hairline.
+- The hex values are sRGB, and they round-trip through the generic RGB space
+  AppKit rasterizes into without a hue shift. A more saturated pink
+  (`#D80048`) clipped there and rendered 7 degrees off its declared hue, which
+  the rendered-hue test in `Tests/ContextBuddyAppTests/StatusItemIconTests.swift`
+  catches at a 5-degree tolerance.
 
 ### 9.2 Animation policy
 
@@ -733,7 +776,7 @@ Colour encodes distance from the threshold, never raw magnitude:
 
 | Condition | Colour |
 |---|---|
-| Past the §5.2 attention threshold | orange (the `attention` icon tint, §9.1) |
+| Past the §5.2 attention threshold | orange (the `attention` hue family, §9.1 — not that row's menu-bar tint, which carries an appearance-specific variant) |
 | Exactly at the threshold | yellow |
 | Otherwise | secondary/neutral |
 
