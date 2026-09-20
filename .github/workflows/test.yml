@@ -34,7 +34,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install plugin test dependencies
         # jq ships on the macos-15 image; brew is a no-op for already-installed formulae.
@@ -49,7 +49,7 @@ jobs:
           ruff --version
 
       - name: Cache SwiftPM build
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: .build
           # Package.resolved is gitignored, so key on the manifest plus sources.
