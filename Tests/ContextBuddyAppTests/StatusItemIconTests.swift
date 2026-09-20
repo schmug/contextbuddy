@@ -197,6 +197,175 @@ final class StatusItemIconTests: XCTestCase {
         }
     }
 
+    // MARK: - #37: one configuration, even weight, distinct silhouettes
+
+    // Every name in the §9.1 table must exist in the macOS 15 SF Symbols set.
+    // `NSImage(systemSymbolName:)` returns nil for an unknown name and
+    // StatusIconImageView then assigns nil to `image`, so a typo ships as a
+    // blank menu bar with no error anywhere. The macOS 15 floor is verified
+    // against CoreGlyphs' own `name_availability.plist` (see SPEC §9.1); this
+    // test is the runtime half — it catches a name that does not resolve on
+    // whatever SDK is building.
+    func testEverySymbolInTheTableResolvesToAnImage() {
+        for state in BuddyState.allCases {
+            let name = IconStyle.style(for: state, animationsEnabled: false).symbol
+            XCTAssertNotNil(
+                NSImage(systemSymbolName: name, accessibilityDescription: nil),
+                "\(state.rawValue): \"\(name)\" does not resolve — the menu bar would render nothing"
+            )
+        }
+    }
+
+    // #37's first complaint: the seven symbols were built with no
+    // SymbolConfiguration at all, so each rendered at its own natural metrics
+    // (widths 15/16/17pt, heights 14/15/17pt). They now share one point size.
+    //
+    // This asserts the property that is actually achievable, which is NOT
+    // "image.size is equal across states": SF Symbols have different aspect
+    // ratios, and the only way to force one size is to draw each glyph into a
+    // fixed canvas — which replaces NSSymbolImageRep with NSCustomImageRep and
+    // takes every §9.1 animation with it (see the test below). What a shared
+    // pointSize does guarantee is one type size for the whole set, and that
+    // every glyph fits inside StatusItemIcon.glyphBox so `.scaleNone` never
+    // clips one. The status item itself no longer changes width regardless:
+    // StatusItemIcon.length is fixed.
+    func testEveryStateSharesOneSymbolConfigurationAndFitsTheGlyphBox() {
+        var natural = 0
+        for state in BuddyState.allCases {
+            let name = IconStyle.style(for: state, animationsEnabled: false).symbol
+            guard let raw = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+                XCTFail("\(state.rawValue): \(name) does not resolve"); continue
+            }
+            let button = makeButton(appearance: .darkAqua)
+            StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
+            guard let shipped = StatusItemIcon.imageView(in: button)?.image else {
+                XCTFail("\(state.rawValue): no image"); continue
+            }
+            // Spelled out rather than chained: the optional-chained form blew
+            // the type checker's expression budget on Swift 6.4 (CLAUDE.md,
+            // "CI compiles with Swift 6.1.2").
+            guard let configured = raw.withSymbolConfiguration(IconStyle.symbolConfiguration) else {
+                XCTFail("\(state.rawValue): the shared configuration does not apply to \(name)"); continue
+            }
+            let expected: NSSize = configured.size
+            XCTAssertEqual(shipped.size.width, expected.width, accuracy: 0.01,
+                           "\(state.rawValue) is not built through IconStyle.symbolConfiguration")
+            XCTAssertEqual(shipped.size.height, expected.height, accuracy: 0.01,
+                           "\(state.rawValue) is not built through IconStyle.symbolConfiguration")
+            XCTAssertLessThanOrEqual(
+                shipped.size.width, StatusItemIcon.glyphBox.width,
+                "\(state.rawValue) is \(Colorimetry.f(shipped.size.width))pt wide and would clip in the "
+                + "\(Colorimetry.f(StatusItemIcon.glyphBox.width))pt glyph box (imageScaling is .scaleNone)")
+            XCTAssertLessThanOrEqual(
+                shipped.size.height, StatusItemIcon.glyphBox.height,
+                "\(state.rawValue) is \(Colorimetry.f(shipped.size.height))pt tall and would clip in the "
+                + "\(Colorimetry.f(StatusItemIcon.glyphBox.height))pt glyph box (imageScaling is .scaleNone)")
+            if abs(shipped.size.height - raw.size.height) > 0.01 { natural += 1 }
+        }
+        XCTAssertGreaterThan(natural, 0,
+                             "no state's metrics changed — is a SymbolConfiguration being applied at all?")
+    }
+
+    // The regression the previous test's comment describes, pinned directly.
+    // `addSymbolEffect` animates the layers inside an NSSymbolImageRep. Draw a
+    // configured symbol into a fixed-size NSImage to equalise `image.size` and
+    // the result is an NSCustomImageRep with no symbol data, so every §9.1
+    // effect silently becomes a no-op — #35 all over again, and invisible to
+    // the motion tests above, which only assert what StatusItemIcon *recorded*.
+    func testTheShippedImageIsStillASymbolImage() {
+        for state in BuddyState.allCases {
+            let button = makeButton(appearance: .darkAqua)
+            StatusItemIcon.apply(state: state, animationsEnabled: true, to: button)
+            let reps = StatusItemIcon.imageView(in: button)?.image?.representations ?? []
+            let classes = reps.map { NSStringFromClass(type(of: $0)) }
+            XCTAssertTrue(
+                classes.contains("NSSymbolImageRep"),
+                "\(state.rawValue) is backed by \(classes) rather than NSSymbolImageRep — SF Symbol "
+                + "effects have no layers to animate. Do not wrap the symbol in a fixed-size canvas.")
+        }
+    }
+
+    // #37's second complaint: optical weight swung 5.5x across the set —
+    // `circle.dotted` (busy, the state shown most while work happens) at 3.18%
+    // of the button against `heart.fill` at 18.63%, measured the same way. The
+    // set did not read as one family.
+    //
+    // Measured through an opaque tint, so this is the glyph's own weight and
+    // nothing else. The shipped tint's alpha is deliberately not in it:
+    // `sleep` takes `.secondaryLabelColor`, which is semi-transparent by
+    // contract, and renders 6.06% against the same moon's 9.38% opaque. That
+    // dimming is a property of the colour, governed by the contrast floors
+    // above and §9.1's `sleep` exception — folding it in here would report a
+    // deliberately quiet state as a badly drawn one. That the tinted glyph is
+    // still thick enough to see is a separate assertion
+    // (testEveryStateDrawsEnoughInkToBeVisible).
+    //
+    // §9.1 states a 2x band. Measured 7.85% (busy) to 13.86% (idle) = 1.77x.
+    func testInkCoverageAcrossTheSetStaysInsideTheStatedBand() {
+        var measured: [(BuddyState, Double)] = []
+        for state in BuddyState.allCases {
+            let opaque = render(state, appearance: .darkAqua, background: Self.darkMenuBar,
+                                overrideTint: .white)
+            measured.append((state, opaque.inkCoverage))
+        }
+        let lo = measured.min { $0.1 < $1.1 }!, hi = measured.max { $0.1 < $1.1 }!
+        let report = measured
+            .map { "\($0.0.rawValue) \(Colorimetry.f($0.1 * 100))%" }
+            .joined(separator: ", ")
+        XCTAssertGreaterThan(lo.1, 0.05, "\(lo.0.rawValue) is the faintest at "
+                             + "\(Colorimetry.f(lo.1 * 100))% — \(report)")
+        XCTAssertLessThan(hi.1, 0.20, "\(hi.0.rawValue) is the heaviest at "
+                          + "\(Colorimetry.f(hi.1 * 100))% — \(report)")
+        XCTAssertLessThanOrEqual(hi.1 / lo.1, 2.0,
+                                 "ink coverage spans \(Colorimetry.f(hi.1 / lo.1))x across the set "
+                                 + "(\(hi.0.rawValue) vs \(lo.0.rawValue)); §9.1 states a 2x band — \(report)")
+    }
+
+    // #37's third complaint, and the one §9.6 makes expensive: two pairs of
+    // states were near-indistinguishable, collapsing seven signals into about
+    // four. `circle` (idle) and `circle.dotted` (busy) shared an outline and
+    // differed only in stroke continuity; `exclamationmark.triangle`
+    // (attention) and `exclamationmark.arrow.circlepath` (dizzy) were both an
+    // orange exclamation mark with the same tint.
+    //
+    // Measured with colour removed, so this is a claim about shape alone:
+    // 1 - soft IoU of the two glyphs' alpha masks at the real 22pt/2x size,
+    // each energy-normalised (so a heavier glyph cannot score "different"
+    // merely by painting more) and Gaussian-blurred to stand in for how little
+    // detail survives at menu bar size. 0 is the same shape, 1 is no overlap.
+    //
+    // The old pairs measured 0.109 (idle/busy) and 0.736 (attention/dizzy);
+    // the new ones 0.753 and 0.780, and the closest of all 21 pairs is 0.682.
+    // The 0.45 floor leaves room for SF Symbols artwork differing between the
+    // CI runner's symbol set and a newer local one.
+    func testStatesSharingATintAreDistinguishableBySilhouetteAlone() {
+        for (first, second) in [(BuddyState.idle, BuddyState.busy),
+                                (BuddyState.attention, BuddyState.dizzy)] {
+            let apart = Colorimetry.silhouetteDistance(alphaMask(first), alphaMask(second))
+            XCTAssertGreaterThan(
+                apart, 0.45,
+                "\(first.rawValue) and \(second.rawValue) share a tint and their silhouettes are only "
+                + "\(Colorimetry.f(apart)) apart at menu bar size — they will read as one state")
+        }
+    }
+
+    // The weaker guarantee for the whole set: no two of the seven, whatever
+    // their tints, collapse into the same shape.
+    func testNoTwoStatesCollapseIntoTheSameSilhouette() {
+        let all = BuddyState.allCases
+        var masks: [BuddyState: [Double]] = [:]
+        for state in all { masks[state] = alphaMask(state) }
+        for (index, first) in all.enumerated() {
+            for second in all[(index + 1)...] {
+                let apart = Colorimetry.silhouetteDistance(masks[first]!, masks[second]!)
+                XCTAssertGreaterThan(
+                    apart, 0.40,
+                    "\(first.rawValue) and \(second.rawValue) are only \(Colorimetry.f(apart)) apart "
+                    + "in silhouette at menu bar size")
+            }
+        }
+    }
+
     // MARK: - Accessibility and tooltip
 
     func testEveryStateCarriesItsAccessibilityDescriptionAndTooltip() {
@@ -472,6 +641,33 @@ extension StatusItemIconTests {
         )
     }
 
+    // The glyph's alpha channel alone, with colour entirely out of the picture:
+    // the shape #37 asks about, at the size it is actually read. Rendered over
+    // a transparent backing rather than a menu bar grey, so a light-bar and a
+    // dark-bar render of the same symbol produce the same mask.
+    func alphaMask(_ state: BuddyState) -> [Double] {
+        let side = Self.buttonPoints * Self.renderScale
+        let button = makeButton(appearance: .darkAqua)
+        StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: side, pixelsHigh: side,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else {
+            XCTFail("could not allocate a mask bitmap for \(state.rawValue)")
+            return [Double](repeating: 0, count: side * side)
+        }
+        rep.size = button.bounds.size
+        button.cacheDisplay(in: button.bounds, to: rep)
+        var mask = [Double](repeating: 0, count: side * side)
+        for y in 0..<side {
+            for x in 0..<side {
+                mask[y * side + x] = Double(rep.colorAt(x: x, y: y)?.alphaComponent ?? 0)
+            }
+        }
+        return mask
+    }
+
     // The motion record of the image view `apply` installed in `button`.
     func motion(of button: NSButton, file: StaticString = #filePath, line: UInt = #line) -> StatusItemIcon.Motion {
         guard let view = StatusItemIcon.imageView(in: button) else {
@@ -547,9 +743,66 @@ enum Colorimetry {
         return min(d, 360 - d)
     }
 
+    // How different two glyphs are in shape alone, at menu bar size.
+    //
+    // 1 - soft IoU of two square alpha masks. Each mask is first blurred, to
+    // stand in for the detail that does not survive at 15pt in peripheral
+    // vision (`circle` and `circle.dotted` are 22 disconnected dots apart at
+    // full resolution and the same ring once blurred, which is exactly the
+    // complaint), then energy-normalised, so a heavier glyph cannot score
+    // "different" merely by painting more ink than its partner.
+    //
+    // 0 is the same shape, 1 is no overlap at all.
+    static func silhouetteDistance(_ a: [Double], _ b: [Double], sigma: Double = 1.2) -> Double {
+        let side = Int(Double(a.count).squareRoot().rounded())
+        guard side * side == a.count, a.count == b.count else { return 0 }
+        let ba = blur(a, side: side, sigma: sigma), bb = blur(b, side: side, sigma: sigma)
+        let sa = ba.reduce(0, +), sb = bb.reduce(0, +)
+        guard sa > 0, sb > 0 else { return 0 }
+        var intersection = 0.0, union = 0.0
+        for i in 0..<ba.count {
+            let x = ba[i] / sa, y = bb[i] / sb
+            intersection += min(x, y)
+            union += max(x, y)
+        }
+        guard union > 0 else { return 0 }
+        return 1 - intersection / union
+    }
+
+    // Separable Gaussian blur over a square single-channel image, clamped at
+    // the edges.
+    static func blur(_ source: [Double], side: Int, sigma: Double) -> [Double] {
+        let radius = max(1, Int((sigma * 3).rounded(.up)))
+        var kernel = (-radius...radius).map { exp(-Double($0 * $0) / (2 * sigma * sigma)) }
+        let total = kernel.reduce(0, +)
+        kernel = kernel.map { $0 / total }
+        var horizontal = [Double](repeating: 0, count: source.count)
+        var out = [Double](repeating: 0, count: source.count)
+        for y in 0..<side {
+            for x in 0..<side {
+                var acc = 0.0
+                for (k, weight) in kernel.enumerated() {
+                    acc += source[y * side + min(side - 1, max(0, x + k - radius))] * weight
+                }
+                horizontal[y * side + x] = acc
+            }
+        }
+        for y in 0..<side {
+            for x in 0..<side {
+                var acc = 0.0
+                for (k, weight) in kernel.enumerated() {
+                    acc += horizontal[min(side - 1, max(0, y + k - radius)) * side + x] * weight
+                }
+                out[y * side + x] = acc
+            }
+        }
+        return out
+    }
+
     static func distance(_ a: (Double, Double, Double), _ b: (Double, Double, Double)) -> Double {
         ((a.0 - b.0) * (a.0 - b.0) + (a.1 - b.1) * (a.1 - b.1) + (a.2 - b.2) * (a.2 - b.2)).squareRoot()
     }
 
     static func f(_ v: Double) -> String { String(format: "%.2f", v) }
 }
+

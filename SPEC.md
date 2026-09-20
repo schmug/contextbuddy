@@ -688,12 +688,68 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 | State | SF Symbol | Tint | Animation |
 |---|---|---|---|
 | `sleep` | `moon.zzz` | `.secondary` (dimmed) | none |
-| `idle` | `circle` | `.primary` | none |
-| `busy` | `circle.dotted` | `.primary` | subtle rotation, indefinite |
+| `idle` | `record.circle` | `.primary` | none |
+| `busy` | `progress.indicator` | `.primary` | subtle rotation, indefinite |
 | `attention` | `exclamationmark.triangle` | `.orange` — `.systemOrange` on a dark menu bar, `#B15000` on a light one | 300ms scale pulse on transition (one-shot) |
 | `celebrate` | `sparkles` | `.yellow` — `.systemYellow` on a dark menu bar, `#7B6C00` on a light one | `.symbolEffect(.bounce)`, ~2.5s |
-| `dizzy` | `exclamationmark.arrow.circlepath` | `.orange`, the same pair as `attention` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
-| `heart` | `heart.fill` | `.pink` — `.systemPink` on a dark menu bar, `#C42048` on a light one | `.symbolEffect(.pulse)` once, hold ~3s |
+| `dizzy` | `repeat` | `.orange`, the same pair as `attention` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
+| `heart` | `heart` | `.pink` — `.systemPink` on a dark menu bar, `#C42048` on a light one | `.symbolEffect(.pulse)` once, hold ~3s |
+
+All seven are built through one shared `NSImage.SymbolConfiguration(pointSize:
+15, weight: .regular)`, so the set has a single type size. Before #37 there was
+no configuration at all and each symbol drew at its own natural metrics —
+widths of 15, 16 and 17pt, heights of 14, 15 and 17pt.
+
+That does **not** make `image.size` equal across the seven, and it must not be
+made equal. SF Symbols have different aspect ratios, so the only way to force
+one size is to draw each glyph into a fixed canvas — which replaces the
+`NSSymbolImageRep` with an `NSCustomImageRep`, and the symbol layers every
+animation above depends on go with it (measured: `isSymbolImage` 1 → 0). The
+status item does not change width regardless: `StatusItemIcon.length` is fixed
+at 28pt, a 22pt glyph box plus 3pt each side. 15pt is the largest size
+at which every glyph still fits that box, and the image view scales nothing, so
+a wider glyph is clipped rather than shrunk — `infinity` at 23pt was rejected
+for exactly that.
+
+Every symbol above exists in the macOS 15 SF Symbols set, which is the floor
+`Package.swift` declares. Verified against CoreGlyphs'
+`name_availability.plist` rather than by trying them on a newer machine: an
+unknown name makes `NSImage(systemSymbolName:)` return nil and the buddy
+renders a blank menu bar with no error anywhere.
+
+**Distinct silhouettes.** Because §9.6 gives the buddy no notification, no
+sound and no window, two states that look alike are two states the product
+cannot tell apart. Shape carries that load, not colour: `idle`/`busy` share
+`.primary` and `attention`/`dizzy` share `.orange` by design.
+
+Silhouette distance below is `1 - soft IoU` of two glyphs' alpha masks at the
+real 22pt/2x size, each energy-normalised (so a heavier glyph cannot score
+"different" merely by painting more ink) and Gaussian-blurred at sigma 1.2px to
+stand in for the detail that does not survive at menu bar size. 0 is the same
+shape, 1 is no overlap; colour is not an input.
+
+| Pair | Before #37 | Now |
+|---|---|---|
+| `idle` / `busy` | 0.109 (`circle` vs `circle.dotted` — one ring, differing only in stroke continuity) | 0.753 |
+| `attention` / `dizzy` | 0.736 (both an orange exclamation mark) | 0.780 |
+| closest of all 21 pairs | 0.109 | 0.682 |
+
+`Tests/ContextBuddyAppTests/StatusItemIconTests.swift` holds both pairs above
+0.45 and every pair above 0.40.
+
+**Even optical weight.** Ink coverage is the alpha-weighted fraction of the
+22pt glyph box a symbol paints, measured through an opaque tint so it describes
+the glyph and not the colour. It spans at most **2x** across the seven.
+Measured 9.27% (`busy`) to 16.37% (`idle`) = 1.77x. Before #37 it spanned 5.9x,
+from `circle.dotted` at 3.18% — the faintest glyph in the set, and the one
+shown most of the time work is happening — to `heart.fill` at 18.63%.
+
+The tint's own alpha is deliberately outside that number. `sleep` is
+`.secondaryLabelColor` and renders 6.06% once its transparency is applied
+against the same moon's 11.07% opaque; that dimming is a property of the
+colour, governed by the contrast floors below, and folding it in here would
+report a deliberately quiet state as a badly drawn one.
+
 
 **Contrast floor.** Every tint clears WCAG 4.5:1 against the menu bar in both
 appearances. `sleep` is the one exception: it is `.secondary` by contract —
@@ -723,6 +779,10 @@ bar):
 Light-appearance hue separation: 25.6 degrees between `attention` and
 `celebrate`, 41.8 between `attention` and `heart`, 67.3 between `celebrate`
 and `heart`.
+
+#37 changed four glyphs and no tints, and the table above was re-measured
+after that change rather than assumed to still hold — contrast is a property
+of the resolved tint, so the numbers are unchanged.
 
 Two constraints on anyone changing these values:
 
