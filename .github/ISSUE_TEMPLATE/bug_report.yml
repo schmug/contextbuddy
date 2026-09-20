@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in the app, the plugin, or a grade is wrong
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you paste anything: ContextBuddy reads your Claude Code
+        transcripts, so logs and grade records can contain your real prompts.
+        Replace prompt and response text with placeholders.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Launched with `claude --plugin-dir ./plugin/`
+        2. Sent a prompt
+        3. Popover showed …
+    validations:
+      required: true
+
+  - type: dropdown
+    id: half
+    attributes:
+      label: Which half
+      options:
+        - Menubar app (Swift)
+        - Plugin hooks / grader
+        - Both, or not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Grader backend
+      description: Which backend was configured when this happened.
+      options:
+        - haiku
+        - claude -p
+        - typesafe (Jev)
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: ContextBuddy commit or release
+      placeholder: "git rev-parse --short HEAD"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: macOS and Claude Code versions
+      placeholder: "macOS 15.4, Claude Code 2.x"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: >
+        A `history.jsonl` line, hook stderr, or a crash trace.
+        Redact prompt text first. This is rendered as a code block.
+      render: text
+
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed real prompt and transcript text from everything above
+          required: true
+        - label: I checked that `bash scripts/test_plugin.sh` and `swift test` pass on a clean checkout
+          required: false

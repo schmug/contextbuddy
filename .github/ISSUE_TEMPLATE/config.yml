@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/schmug/contextbuddy/security/advisories/new
+    about: Report privately instead of opening an issue. See SECURITY.md.
+  - name: Setup and configuration help
+    url: https://github.com/schmug/contextbuddy#install
+    about: Install steps, backend selection, and configuration keys are in the README.

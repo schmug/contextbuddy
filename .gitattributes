@@ -1,0 +1,19 @@
+# Normalize line endings on the way in; check out LF everywhere.
+* text=auto eol=lf
+
+*.swift  text
+*.sh     text eol=lf
+*.mjs    text
+*.py     text
+*.md     text
+*.json   text
+*.jsonl  text
+*.toml   text
+*.yml    text
+*.yaml   text
+
+# Binary — never diff, never munge.
+*.png    binary
+*.icns   binary
+*.dmg    binary
+*.zip    binary

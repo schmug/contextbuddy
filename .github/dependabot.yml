@@ -1,0 +1,19 @@
+# Only the GitHub Actions ecosystem is watched.
+#
+# There is nothing else to watch yet: Package.swift declares no external
+# dependencies, and the Node-side grader tests run on `node --test` with no
+# package.json. Add an ecosystem here the day either of those changes.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      actions:
+        patterns:
+          - "*"
