@@ -208,12 +208,34 @@ enum StatusItemIcon {
         ui.animationsEnabled && !reduceMotion
     }
 
+    // `graderStatus` adds one tooltip line when the grader could not run
+    // (§4.10, issue #92). The glyph, tint and motion are untouched: a broken
+    // grader is a tooling fault, not a grade, and §9.1's seven states each mean
+    // something about the conversation. It reaches the accessibility label too,
+    // because a hover tooltip is not available to VoiceOver.
     @MainActor
-    static func apply(state: BuddyState, animationsEnabled: Bool, to button: NSButton) {
+    static func apply(
+        state: BuddyState,
+        animationsEnabled: Bool,
+        graderStatus: GraderStatus? = nil,
+        to button: NSButton
+    ) {
         let view = imageView(in: button) ?? install(in: button)
         view.render(state: state, animationsEnabled: animationsEnabled)
-        button.setAccessibilityLabel(state.rawValue)
-        button.toolTip = "ContextBuddy: \(state.rawValue)"
+        button.setAccessibilityLabel(accessibilityLabel(state: state, graderStatus: graderStatus))
+        button.toolTip = toolTip(state: state, graderStatus: graderStatus)
+    }
+
+    // Pure, so StatusItemIconTests pins the wording without a live status item.
+    static func toolTip(state: BuddyState, graderStatus: GraderStatus?) -> String {
+        let base = "ContextBuddy: \(state.rawValue)"
+        guard let graderStatus, graderStatus.isFailure else { return base }
+        return "\(base)\n\(graderStatus.summaryLine)"
+    }
+
+    static func accessibilityLabel(state: BuddyState, graderStatus: GraderStatus?) -> String {
+        guard let graderStatus, graderStatus.isFailure else { return state.rawValue }
+        return "\(state.rawValue), \(graderStatus.summaryLine)"
     }
 
     // The image view `apply` installed in `button`; nil before the first call.

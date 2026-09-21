@@ -27,6 +27,62 @@ final class CoreTests: XCTestCase {
         XCTAssertNil(snap.lastGrade)
     }
 
+    // Issue #92. A grader with no reachable credential writes no last.json, so
+    // the state stays `sleep` and the watcher never fires. grader_status.json is
+    // the only thing on disk that distinguishes it from a quiet session, and the
+    // snapshot is the only route from there to the UI.
+    func testSnapshotCarriesTheGraderStatusForASessionWithNoGrade() async throws {
+        let hash = "aaaabbbbcccc"
+        let session = inspectorRoot.appendingPathComponent("sessions").appendingPathComponent(hash)
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        try """
+        {"schema_version":1,"timestamp":"2026-09-20T18:00:00Z","phase":"pre","turn":1,\
+        "backend":"typesafe","status":"error","reason":"missing_key","detail":"d"}
+        """.write(to: session.appendingPathComponent("grader_status.json"), atomically: true, encoding: .utf8)
+
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await core.currentSnapshot()
+        XCTAssertEqual(snap.state, .sleep, "no grade, so the state is unchanged")
+        XCTAssertNil(snap.lastGrade)
+        XCTAssertEqual(snap.graderStatus?.reason, .missingKey)
+        XCTAssertEqual(snap.graderStatus?.backend, "typesafe")
+    }
+
+    // A session dir written before the record existed, or one whose first
+    // attempt has not finished. Absence must read as "nothing recorded", never
+    // as a failure the UI then cannot explain.
+    func testSnapshotGraderStatusIsNilWhenTheRecordIsAbsent() async throws {
+        let session = inspectorRoot.appendingPathComponent("sessions").appendingPathComponent("ddddeeeeffff")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+        let snap = await core.currentSnapshot()
+        XCTAssertNil(snap.graderStatus)
+    }
+
+    // The failing grader has no other event source: nothing it writes is
+    // watched, so the 30 s tick is what notices. The tick broadcasts only on a
+    // change, and without this the record would sit unread until some unrelated
+    // state or config change happened to push a snapshot.
+    func testSleepTickBroadcastsWhenTheGraderStatusChanges() async throws {
+        let session = inspectorRoot.appendingPathComponent("sessions").appendingPathComponent("111122223333")
+        try FileManager.default.createDirectory(at: session, withIntermediateDirectories: true)
+        let core = try await BuddyCore(inspectorRoot: inspectorRoot)
+
+        let stream = await core.subscribe()
+        var iterator = stream.makeAsyncIterator()
+        let first = await iterator.next()
+        XCTAssertNil(first?.graderStatus)
+
+        try """
+        {"schema_version":1,"timestamp":"t","phase":"pre","turn":1,\
+        "backend":"typesafe","status":"error","reason":"missing_key","detail":"d"}
+        """.write(to: session.appendingPathComponent("grader_status.json"), atomically: true, encoding: .utf8)
+
+        await core.runSleepTick()
+        let second = await iterator.next()
+        XCTAssertEqual(second?.graderStatus?.reason, .missingKey)
+    }
+
     // The popover colours each score meter by its distance from that
     // dimension's own attention threshold, so the thresholds have to reach the
     // view. `config` is private to the actor; Snapshot is the only channel.

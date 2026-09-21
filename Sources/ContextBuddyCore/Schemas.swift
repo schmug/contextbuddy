@@ -264,6 +264,132 @@ public enum DominantSignal: String, Codable, Equatable, Sendable {
     case harm
 }
 
+// MARK: - GraderStatus (grader_status.json)
+//
+// Per §4.10 (issue #92). The plugin writes one record per grader attempt,
+// whatever the outcome; the buddy reads it to tell "nobody typed anything"
+// apart from "the grader cannot run". Before this file existed the two were
+// the same picture: a grader with no reachable credential wrote nothing at
+// all, and the buddy held `sleep` indefinitely with no way to say why.
+//
+// Decoded leniently on purpose. An unrecognized `status` or `reason` — a
+// newer plugin writing next to an older app, the two halves ship together but
+// are installed separately — degrades to `.unknown` rather than failing the
+// whole decode. Failing would put the app back in the state this record
+// exists to end: no grade and no explanation.
+public struct GraderStatus: Equatable, Sendable {
+    public enum Outcome: String, Equatable, Sendable {
+        // A grade was produced and written.
+        case ok
+        // The grader ran and declined to grade this turn (the typesafe
+        // backend's is_task gate). Not a fault.
+        case skipped
+        // The grader could not produce a grade.
+        case error
+        case unknown
+    }
+
+    // Why there is no grade. nil when `status` is ok.
+    public enum Reason: String, Equatable, Sendable {
+        case notATask = "not_a_task"
+        case missingKey = "missing_key"
+        case notConfigured = "not_configured"
+        case transportFailure = "transport_failure"
+        case invalidResponse = "invalid_response"
+        case unknown
+    }
+
+    public var schemaVersion: Int
+    public var timestamp: String
+    public var phase: Phase?
+    public var turn: Int
+    public var backend: String
+    public var status: Outcome
+    public var reason: Reason?
+    // A fixed sentence chosen by the plugin from the reason class. It never
+    // carries anything the backend printed (plugin/lib/grader_status.sh), so
+    // it cannot leak a credential — but it is also not rendered in the UI,
+    // which shows backend and reason only.
+    public var detail: String?
+
+    public init(
+        schemaVersion: Int = 1,
+        timestamp: String,
+        phase: Phase?,
+        turn: Int,
+        backend: String,
+        status: Outcome,
+        reason: Reason?,
+        detail: String? = nil
+    ) {
+        self.schemaVersion = schemaVersion
+        self.timestamp = timestamp
+        self.phase = phase
+        self.turn = turn
+        self.backend = backend
+        self.status = status
+        self.reason = reason
+        self.detail = detail
+    }
+
+    // The one question the UI asks: should the user be told grading is not
+    // happening? `skipped` is deliberately not a failure — the grader ran.
+    public var isFailure: Bool { status == .error }
+
+    // The line the popover row, the menubar tooltip and the right-click menu
+    // all show (§9.3 / §9.4). Backend and reason class only.
+    public var summaryLine: String {
+        "grading unavailable — \(backend): \(reasonPhrase)"
+    }
+
+    public var reasonPhrase: String {
+        switch reason {
+        case .missingKey: return "no API key reachable from this project"
+        case .notConfigured: return "backend not configured"
+        case .transportFailure: return "backend unreachable"
+        case .invalidResponse: return "backend returned an invalid grade"
+        case .notATask: return "turn not graded"
+        case .unknown, .none: return "unknown reason"
+        }
+    }
+}
+
+extension GraderStatus: Codable {
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case timestamp, phase, turn, backend, status, reason, detail
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        timestamp = try c.decodeIfPresent(String.self, forKey: .timestamp) ?? ""
+        phase = (try c.decodeIfPresent(String.self, forKey: .phase)).flatMap(Phase.init(rawValue:))
+        turn = try c.decodeIfPresent(Int.self, forKey: .turn) ?? 0
+        backend = try c.decodeIfPresent(String.self, forKey: .backend) ?? "unknown"
+        let rawStatus = try c.decodeIfPresent(String.self, forKey: .status)
+        status = rawStatus.flatMap(Outcome.init(rawValue:)) ?? .unknown
+        if let rawReason = try c.decodeIfPresent(String.self, forKey: .reason) {
+            reason = Reason(rawValue: rawReason) ?? .unknown
+        } else {
+            reason = nil
+        }
+        detail = try c.decodeIfPresent(String.self, forKey: .detail)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(schemaVersion, forKey: .schemaVersion)
+        try c.encode(timestamp, forKey: .timestamp)
+        try c.encodeIfPresent(phase?.rawValue, forKey: .phase)
+        try c.encode(turn, forKey: .turn)
+        try c.encode(backend, forKey: .backend)
+        try c.encode(status.rawValue, forKey: .status)
+        try c.encodeIfPresent(reason?.rawValue, forKey: .reason)
+        try c.encodeIfPresent(detail, forKey: .detail)
+    }
+}
+
 // MARK: - FeedbackEvent (feedback.jsonl)
 //
 // Per §4.6. Buddy writes; plugin reads (eventually).

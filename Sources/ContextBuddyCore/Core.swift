@@ -38,6 +38,17 @@ public actor BuddyCore {
         // tokenRowPct is the popover's ⚡ row threshold. Equatable like the
         // rest of the snapshot, so a config-only edit still reads as a change.
         public let ui: Config.UI
+        // The last grader attempt for this session (§4.10, issue #92). nil when
+        // the session dir has no grader_status.json — dirs written before the
+        // record existed, and dirs whose first attempt has not finished.
+        //
+        // Carried on the snapshot rather than derived in the view because a
+        // FAILING grader writes no last.json, so the failure has no other route
+        // to the UI: the state stays `sleep` and the popover would otherwise
+        // show a quiet session. Worse, a credential that dies mid-session leaves
+        // a healthy-looking last.json in place, and this is the only field that
+        // contradicts it.
+        public let graderStatus: GraderStatus?
 
         public init(
             state: BuddyState,
@@ -47,7 +58,8 @@ public actor BuddyCore {
             lastGrade: Grade?,
             pinnedHash: String?,
             thresholds: Config.Thresholds = Config.defaults.thresholds,
-            ui: Config.UI = Config.defaults.ui
+            ui: Config.UI = Config.defaults.ui,
+            graderStatus: GraderStatus? = nil
         ) {
             self.state = state
             self.projectHash = projectHash
@@ -57,6 +69,7 @@ public actor BuddyCore {
             self.pinnedHash = pinnedHash
             self.thresholds = thresholds
             self.ui = ui
+            self.graderStatus = graderStatus
         }
     }
 
@@ -91,6 +104,12 @@ public actor BuddyCore {
         let name: String?
     }
     private var projects: [String: ProjectIdentity] = [:]
+    // Last grader status broadcast, so the sleep tick can tell whether the file
+    // on disk moved. A grader that cannot run writes no last.json, so the
+    // watcher never fires for it and the tick is the only thing that notices
+    // (bounded by sleepTickSeconds — acceptable for a tooltip, and far better
+    // than the days the condition previously went unseen).
+    private var lastBroadcastGraderStatus: GraderStatus?
 
     private var subscriber: AsyncStream<Snapshot>.Continuation?
     private var watcherTask: Task<Void, Never>?
@@ -257,6 +276,7 @@ public actor BuddyCore {
         // the snapshot and nothing else re-renders them (#36).
         let configChanged = reloadConfigIfChanged()
         let hash = currentHash ?? ""
+        let graderStatusChanged = currentGraderStatus() != lastBroadcastGraderStatus
         let history = histories[hash] ?? .empty
         let result = StateMachine.tick(prev: state, history: history, now: Date())
         var stateChanged = false
@@ -267,7 +287,7 @@ public actor BuddyCore {
                 Task { try? await self.storage.recordTransition(t, projectHash: hash) }
             }
         }
-        if stateChanged || configChanged {
+        if stateChanged || configChanged || graderStatusChanged {
             broadcast()
         }
     }
@@ -416,12 +436,24 @@ public actor BuddyCore {
         return identity
     }
 
+    // The current session's grader_status.json, re-read on each access. Not
+    // cached: the point of the record is that it changes when nothing else on
+    // disk does.
+    private func currentGraderStatus() -> GraderStatus? {
+        guard let hash = currentHash else { return nil }
+        return SessionDiscovery.graderStatus(
+            inSessionDirectory: sessionsRoot.appendingPathComponent(hash)
+        )
+    }
+
     private func makeSnapshot() -> Snapshot {
         let lastGrade = currentHash.flatMap { histories[$0]?.lastGrade }
         // Resolved here rather than at each currentHash assignment so every
         // path that changes the current session — bootstrap, watcher event,
         // and an explicit pin — carries the project identity for free.
         let project = currentHash.flatMap { resolveProject(for: $0) }
+        let graderStatus = currentGraderStatus()
+        lastBroadcastGraderStatus = graderStatus
         return Snapshot(
             state: state,
             projectHash: currentHash,
@@ -430,7 +462,8 @@ public actor BuddyCore {
             lastGrade: lastGrade,
             pinnedHash: pinnedHash,
             thresholds: config.thresholds,
-            ui: config.ui
+            ui: config.ui,
+            graderStatus: graderStatus
         )
     }
 
