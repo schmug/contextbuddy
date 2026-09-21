@@ -220,6 +220,13 @@ final class StatusItemIconTests: XCTestCase {
     // ink every other state gets, which is what stops a future change from
     // quietly re-dimming it the way #89 and #91 had to undo. SPEC §9.1 records
     // the loss rather than pretending the guarantee survived.
+    //
+    // Only the ink's *colour* is compared, never `resolvedInk`'s alpha. That
+    // alpha says how completely the stroke covers its best-covered pixel,
+    // which is a property of the symbol's artwork and the rasterizer, not of
+    // the colour: locally every glyph reached the same 0.549, while the CI
+    // runner's SF Symbols set produced 0.471 to 0.549 across the seven and
+    // failed an equality that had nothing to do with what it claimed to test.
     func testSleepCarriesNoColourOfItsOwnAndDoesNotMove() {
         let sleep = IconStyle.style(for: .sleep, animationsEnabled: true)
         XCTAssertEqual(sleep.animation, .none, "sleep must not animate")
@@ -232,10 +239,6 @@ final class StatusItemIconTests: XCTestCase {
                     Colorimetry.distance(quiet.rgb, other.rgb), 0, accuracy: 0.01,
                     "sleep's ink on \(appearance.rawValue) differs from \(state.rawValue)'s. "
                     + "sleep is dimmed by symbol and stillness now, not by colour (§9.1, #90)."
-                )
-                XCTAssertEqual(
-                    quiet.alpha, other.alpha, accuracy: 0.01,
-                    "sleep's ink alpha on \(appearance.rawValue) differs from \(state.rawValue)'s"
                 )
             }
         }
