@@ -147,7 +147,7 @@ created_at: 2026-04-29T09:14:00Z
 }
 ```
 
-**Buddy state**: `idle` → `attention` (atomicity 3 < 4 threshold). Orange triangle in menubar.
+**Buddy state**: `idle` → `attention` (atomicity 3 < 4 threshold). Warning triangle in the menubar, with a one-shot pulse.
 
 **Popover**:
 ```
