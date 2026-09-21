@@ -1,7 +1,9 @@
 import AppKit
 import ContextBuddyCore
 
-// Maps BuddyState to (SFSymbol name, tint, animation policy) per §9.1.
+// Maps BuddyState to (SFSymbol name, animation policy) per §9.1. The glyph's
+// colour is not in that mapping: the system supplies it (see "Why there is no
+// tint table here any more" below).
 //
 // The glyph set was redesigned in #37 against three measured faults: no
 // SymbolConfiguration at all, optical weight swinging 5.5x across the seven,
@@ -14,13 +16,18 @@ import ContextBuddyCore
 // SF Symbols set (CoreGlyphs `name_availability.plist`), which is the floor
 // Package.swift sets; an unknown name resolves to nil and renders a blank
 // menu bar with no error.
-// Four tints are appearance-dependent — the three chromatic ones (see
-// `orange` below) and `sleep` (#89).
+// No tint is declared here at all. Every glyph ships as a template image with
+// `contentTintColor` left nil, which is the menu bar extra contract Apple
+// states: "Both interface icons and symbols use black and clear colors to
+// define their shapes; the system can apply other colors to the black areas in
+// each image so it looks good on both dark and light menu bars, and when your
+// menu bar extra is selected." Handing the system a template is what makes the
+// glyph track the bar; declaring a colour opts out of it (#90).
 // Animation policy is owned here so StatusIconImageView can mirror it without
 // re-deciding. `animationsEnabled` is `[ui].animations_enabled` ANDed with the
 // system Reduce Motion switch — StatusItemIcon.animationsEnabled(ui:reduceMotion:)
 // composes them and MenubarController.renderIcon() passes the result — and
-// false suppresses all motion (still emits the symbol + tint). (#36)
+// false suppresses all motion (still emits the symbol). (#36)
 enum IconStyle {
     // One configuration for all seven glyphs (#37). Without it each symbol
     // rendered at its own natural metrics — widths of 15, 16 and 17pt, heights
@@ -40,7 +47,7 @@ enum IconStyle {
     // it (#35's regression, re-measured: `isSymbolImage` goes 1 -> 0). Equal
     // widths are not needed anyway; StatusItemIcon.length is fixed, so the
     // status item has not changed width since #35 regardless of the glyph.
-    // Held the same way as the tints below, and for the same reason:
+    // Held in an @unchecked Sendable holder because
     // NSImage.SymbolConfiguration is not Sendable, so a plain `static let`
     // fails strict concurrency, and `nonisolated(unsafe)` is load-bearing on
     // one of the two SDKs this repo builds against and a warning on the other
@@ -56,132 +63,80 @@ enum IconStyle {
     static func style(for state: BuddyState, animationsEnabled: Bool) -> Style {
         switch state {
         case .sleep:
-            return Style(symbol: "moon.zzz", tint: sleep, animation: .none)
+            return Style(symbol: "moon.zzz", animation: .none)
         case .idle:
-            return Style(symbol: "record.circle", tint: .labelColor, animation: .none)
+            return Style(symbol: "record.circle", animation: .none)
         case .busy:
-            return Style(symbol: "progress.indicator", tint: .labelColor,
+            return Style(symbol: "progress.indicator",
                          animation: animationsEnabled ? .rotateRepeating : .none)
         case .attention:
-            return Style(symbol: "exclamationmark.triangle", tint: orange,
+            return Style(symbol: "exclamationmark.triangle",
                          animation: animationsEnabled ? .scalePulseOnce : .none)
         case .celebrate:
-            return Style(symbol: "sparkles", tint: yellow,
+            return Style(symbol: "sparkles",
                          animation: animationsEnabled ? .bounceOnce : .none)
         case .dizzy:
-            return Style(symbol: "repeat", tint: orange,
+            return Style(symbol: "repeat",
                          animation: animationsEnabled ? .wiggleRepeating : .none)
         case .heart:
-            return Style(symbol: "heart", tint: pink,
+            return Style(symbol: "heart",
                          animation: animationsEnabled ? .pulseOnce : .none)
         }
     }
 
-    // §9.1's three chromatic tints, each a dynamic color: the system color the
-    // SPEC names on a dark menu bar, a darkened variant of the same hue family
-    // on a light one. `sleep` below is the fourth dynamic tint.
+    // Why there is no tint table here any more (#90).
     //
-    // The plain `.system*` colors are only legible on a dark bar. Resolved and
-    // composited over sRGB grey 0.96 they measure 2.11:1 (orange), 1.38:1
-    // (yellow) and 3.34:1 (pink) — `celebrate` all but invisible — against the
-    // 4.5:1 floor §9.1 now commits to (#44). The light values below measure
-    // 4.79:1, 4.82:1 and 5.27:1 and stay at least 25.6 degrees apart in hue,
-    // so darkening does not collapse the three states into one brown glyph;
-    // StatusItemIconTests pins both properties.
+    // §9.1 used to assert a 4.5:1 floor against two opaque greys, sRGB 0.11
+    // for the dark menu bar and 0.96 for the light one, and every tint in the
+    // table was tuned against them. Neither background occurs. Measured on
+    // macOS 26.6.2 by sweeping the desktop picture from black to white and
+    // reading the bar back out of a screen capture:
     //
-    // Each hex is sRGB and round-trips through the generic RGB space AppKit
-    // rasterizes into unchanged. A more saturated pink (0xD80048) clipped
-    // there and rendered 7 degrees off its declared hue, failing the
-    // rendered-hue test. Re-check that round trip before raising saturation.
-    static var orange: NSColor { Tints.shared.orange }
-    static var yellow: NSColor { Tints.shared.yellow }
-    static var pink: NSColor { Tints.shared.pink }
-
-    // `sleep`'s tint, the fourth appearance-dependent one (#89).
+    //   * The bar is effectively transparent. It reads L=0.0000 over a black
+    //     desktop picture and L=0.9647 over a white one — the modelled dark
+    //     bar's L=0.011 is off by the whole range, not by a margin.
+    //   * macOS switches the status item's *effective appearance* with the
+    //     wallpaper's brightness while the system stays in Dark Mode. A probe
+    //     status item tinted blue under .darkAqua and red under .aqua rendered
+    //     blue over a black picture and red over a white one.
+    //   * The two appearances therefore cover disjoint bands, measured
+    //     .darkAqua L=[0.000, 0.195] and .aqua L=[0.546, 0.965]. The switch is
+    //     a step: wallpaper 160 gives a .darkAqua bar at L=0.195, wallpaper
+    //     168 an .aqua bar at L=0.546. Nothing in between is reachable.
+    //   * No flat colour clears 4.5:1 across the .darkAqua band. Beating
+    //     L=0.195 from the light side needs a glyph at L>=1.052, and pure
+    //     white is 1.0 — it reaches 4.29:1 and stops. That is a proof, not a
+    //     tuning problem, so no tint table could have been correct.
     //
-    // It was `.secondaryLabelColor` — white at alpha 0.549 on a dark bar, black
-    // at alpha 0.498 on a light one — and §9.1 exempted it from the 4.5:1 floor
-    // at 3.88:1 on the light bar, on the grounds that it is dimmed by contract.
-    // "Quiet" and "below the floor" are not the same claim, and `sleep` is the
-    // state the buddy holds most of the time, so the exemption is gone and the
-    // two alphas are pinned here instead of inherited.
+    // The fix is to stop declaring a colour. A template image with
+    // `contentTintColor` nil is coloured by the system, which inverts it with
+    // the bar. Measured against Docker's icon in the same captures, ink versus
+    // its own local bar:
     //
-    // Deliberately still an alpha over black and white rather than an opaque
-    // grey, which is the form the three chromatic tints take. A tint composited
-    // at alpha tracks whatever is behind the translucent menu bar; an opaque
-    // one does not. Over the mid-tone bar reported in #89 (sRGB 96,103,126) the
-    // light variant measures 2.40:1, where `#6F6F6F` — the opaque grey that
-    // measures the same 4.6:1 on the modelled 0.96 bar — manages 1.12:1.
-    // Whether §9.1's model should be re-based on a translucent bar at all is
-    // #90; keeping the alpha costs nothing under the current model and does not
-    // pre-empt that decision.
-    static var sleep: NSColor { Tints.shared.sleep }
-
-    // One instance, built once, so each accessor above hands back the *same*
-    // NSColor every call. IconStyle.Style is Equatable and
-    // StatusIconImageView.render compares the incoming style against the
-    // current one to tell a state transition from a redundant snapshot (§9.2);
-    // a fresh dynamic NSColor per call never compares equal, which would
-    // remove and re-add the held effect on every snapshot and make dizzy's
-    // wiggle visibly restart.
+    //   bar L=0.000  16.83:1 (Docker 16.79)   bar L=0.147  4.69:1 (4.62)
+    //   bar L=0.188   3.92:1 (Docker 3.93)    bar L=0.521  9.37:1 (9.27)
+    //   bar L=0.956  15.06:1 (Docker 14.74)
     //
-    // A holder rather than four `nonisolated(unsafe) static let`s: NSColor is
-    // Sendable on the macOS 26 SDK and not on the macos-15 CI runner's, so the
-    // annotation warns on one and is required on the other (#43, #46). This
-    // compiles clean on both. The stored properties are immutable and AppKit
-    // resolves a dynamic color per drawing appearance on whatever thread
-    // draws, which is what `@unchecked` is asserting.
-    private final class Tints: @unchecked Sendable {
-        static let shared = Tints()
-        let orange = adaptive("contextbuddy.attention", light: 0xB1_50_00) { .systemOrange }
-        let yellow = adaptive("contextbuddy.celebrate", light: 0x7B_6C_00) { .systemYellow }
-        let pink = adaptive("contextbuddy.heart", light: 0xC4_20_48) { .systemPink }
-        let sleep = adaptive("contextbuddy.sleep",
-                             light: { srgb(0x00_00_00, alpha: 0.55) },
-                             dark: { srgb(0xFF_FF_FF, alpha: 0.60) })
-    }
-
-    // `bestMatch` rather than a raw name comparison so the high-contrast and
-    // vibrant appearances resolve to the variant they are derived from instead
-    // of silently falling through to the light branch.
+    // ContextBuddy now tracks the system's own menu bar items within 2% at
+    // every background. The worst point, 3.92:1, is a macOS ceiling that
+    // Docker hits too; it is not something a tint could have bought back.
+    // `.labelColor` is not equivalent — its alpha lets the bar through, and it
+    // measured 8.84:1 where the untinted template measured 15.06:1 on a white
+    // bar.
     //
-    // `dark` is a closure, not an NSColor: the provider may be `@Sendable` on
-    // some SDKs, and a captured NSColor is not. Nothing non-Sendable crosses
-    // into it.
-    private static func adaptive(
-        _ name: String,
-        light: UInt32,
-        dark: @escaping @Sendable () -> NSColor
-    ) -> NSColor {
-        adaptive(name, light: { srgb(light) }, dark: dark)
-    }
+    // Consequence for the set: colour no longer separates the seven states, so
+    // silhouette carries all of it. #88's separations are the guarantee that
+    // this works — 0.753 for idle/busy, 0.780 for attention/dizzy, 0.682 for
+    // the closest of all 21 pairs — and StatusItemIconTests holds them.
+    //
+    // Do not reintroduce `contentTintColor` to recolour a state. It opts the
+    // glyph out of the system's inversion, which is the whole mechanism.
 
-    // The same thing where the light variant is not an opaque hex either —
-    // `sleep` is the one such tint (#89).
-    private static func adaptive(
-        _ name: String,
-        light: @escaping @Sendable () -> NSColor,
-        dark: @escaping @Sendable () -> NSColor
-    ) -> NSColor {
-        NSColor(name: NSColor.Name(name)) { appearance in
-            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark() : light()
-        }
-    }
-
-    // 0xRRGGBB in sRGB. Pinned to sRGB, not the generic/calibrated space, so
-    // the measured contrast ratios above are the ones that actually ship —
-    // which is also why `sleep`'s two variants spell out 0x000000 and 0xFFFFFF
-    // here rather than using `NSColor(white:alpha:)`, whose white is calibrated.
-    private static func srgb(_ hex: UInt32, alpha: CGFloat = 1) -> NSColor {
-        NSColor(srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
-                green: CGFloat((hex >> 8) & 0xFF) / 255,
-                blue: CGFloat(hex & 0xFF) / 255,
-                alpha: alpha)
-    }
-
+    // No `tint`: the system colours the template image (see above). Style stays
+    // Equatable because StatusIconImageView.render compares it to tell a
+    // transition from a redundant snapshot (§9.2).
     struct Style: Equatable {
         let symbol: String
-        let tint: NSColor
         let animation: Animation
     }
 
@@ -199,8 +154,8 @@ enum IconStyle {
     }
 }
 
-// Applies the §9.1 style for a state to the menubar button: glyph, tint,
-// motion, tooltip and accessibility label.
+// Applies the §9.1 style for a state to the menubar button: glyph, motion,
+// tooltip and accessibility label.
 //
 // Extracted from MenubarController.renderIcon() so ContextBuddyAppTests can
 // render the same pixels into an offscreen NSButton — the controller's own
@@ -333,12 +288,12 @@ final class StatusIconImageView: NSImageView {
         self.state = state
         self.style = next
 
-        // A template image is the only kind NSImageView recolors with
-        // contentTintColor. Setting this to `false` makes the view draw SF
-        // Symbols' own rendering instead — black for the monochrome symbols,
-        // the multicolor variant for the rest — and silently discards every
-        // tint in the table above (#34). ContextBuddyAppTests measures the
-        // rendered pixels, so flipping it back fails the suite.
+        // `isTemplate` is load-bearing twice over. Setting it false makes the
+        // view draw SF Symbols' own rendering instead — black for the
+        // monochrome symbols, the multicolor variant for the rest (#34) — and
+        // it is also what lets the system colour the glyph against the menu
+        // bar at all (#90). ContextBuddyAppTests measures the rendered pixels,
+        // so flipping it back fails the suite.
         // `withSymbolConfiguration` returns a new NSImage and does not carry
         // the accessibility description over, so it is set again on the result
         // — StatusItemIconTests reads it off the shipped image.
@@ -351,7 +306,10 @@ final class StatusIconImageView: NSImageView {
         removeAllSymbolEffects(animated: false)
         motion.held = nil
         image = symbol
-        contentTintColor = next.tint
+        // Explicitly nil, not merely unset: the view is reused across states,
+        // so a tint left behind by an earlier render would stick and opt the
+        // glyph out of the system's inversion (#90).
+        contentTintColor = nil
 
         switch next.animation {
         case .none:

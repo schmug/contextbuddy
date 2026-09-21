@@ -727,15 +727,29 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 
 ### 9.1 Icon mapping
 
-| State | SF Symbol | Tint | Animation |
-|---|---|---|---|
-| `sleep` | `moon.zzz` | dimmed neutral — white at alpha 0.60 on a dark menu bar, black at alpha 0.55 on a light one | none |
-| `idle` | `record.circle` | `.primary` | none |
-| `busy` | `progress.indicator` | `.primary` | subtle rotation, indefinite |
-| `attention` | `exclamationmark.triangle` | `.orange` — `.systemOrange` on a dark menu bar, `#B15000` on a light one | 300ms scale pulse on transition (one-shot) |
-| `celebrate` | `sparkles` | `.yellow` — `.systemYellow` on a dark menu bar, `#7B6C00` on a light one | `.symbolEffect(.bounce)`, ~2.5s |
-| `dizzy` | `repeat` | `.orange`, the same pair as `attention` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
-| `heart` | `heart` | `.pink` — `.systemPink` on a dark menu bar, `#C42048` on a light one | `.symbolEffect(.pulse)` once, hold ~3s |
+| State | SF Symbol | Animation |
+|---|---|---|
+| `sleep` | `moon.zzz` | none |
+| `idle` | `record.circle` | none |
+| `busy` | `progress.indicator` | subtle rotation, indefinite |
+| `attention` | `exclamationmark.triangle` | 300ms scale pulse on transition (one-shot) |
+| `celebrate` | `sparkles` | `.symbolEffect(.bounce)`, ~2.5s |
+| `dizzy` | `repeat` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
+| `heart` | `heart` | `.symbolEffect(.pulse)` once, hold ~3s |
+
+**There is no tint column, and adding one back is a regression.** Every glyph
+ships as a template image with `contentTintColor` left nil, and the system
+colours it. That is the menu bar extra contract Apple states: "Both interface
+icons and symbols use black and clear colors to define their shapes; the system
+can apply other colors to the black areas in each image so it looks good on both
+dark and light menu bars, and when your menu bar extra is selected." Declaring a
+colour opts the glyph out of that and pins it to one side of a bar whose
+brightness the app does not control. §9.1 carried a seven-row tint table until
+#90; "Contrast floor" below is the measurement that retired it.
+
+Colour therefore no longer separates the seven states — **silhouette carries all
+of it**, which is why the separations below are load-bearing rather than
+decorative.
 
 All seven are built through one shared `NSImage.SymbolConfiguration(pointSize:
 15, weight: .regular)`, so the set has a single type size. Before #37 there was
@@ -761,8 +775,13 @@ renders a blank menu bar with no error anywhere.
 
 **Distinct silhouettes.** Because §9.6 gives the buddy no notification, no
 sound and no window, two states that look alike are two states the product
-cannot tell apart. Shape carries that load, not colour: `idle`/`busy` share
-`.primary` and `attention`/`dizzy` share `.orange` by design.
+cannot tell apart. Shape carries that load **alone**: since #90 the system
+draws all seven states in one ink, so there is no colour left to fall back on.
+Two pairs used to share a tint on purpose — `idle`/`busy` and
+`attention`/`dizzy` — and the separations below were what kept those pairs
+apart. They now do that job for all 21 pairs, which makes this table the
+product's only state signal and a regression in it a regression in what the
+buddy can say.
 
 Silhouette distance below is `1 - soft IoU` of two glyphs' alpha masks at the
 real 22pt/2x size, each energy-normalised (so a heavier glyph cannot score
@@ -772,9 +791,9 @@ shape, 1 is no overlap; colour is not an input.
 
 | Pair | Before #37 | Now |
 |---|---|---|
-| `idle` / `busy` | 0.109 (`circle` vs `circle.dotted` — one ring, differing only in stroke continuity) | 0.753 |
+| `idle` / `busy` | 0.109 (`circle` vs `circle.dotted` — one ring, differing only in stroke continuity) | 0.754 |
 | `attention` / `dizzy` | 0.736 (both an orange exclamation mark) | 0.780 |
-| closest of all 21 pairs | 0.109 | 0.682 |
+| closest of all 21 pairs | 0.109 | 0.682 (`busy` / `heart`) |
 
 `Tests/ContextBuddyAppTests/StatusItemIconTests.swift` holds both pairs above
 0.45 and every pair above 0.40.
@@ -794,78 +813,105 @@ folding it in here would report a deliberately quiet state as a badly drawn
 one.
 
 
-**Contrast floor.** Every tint clears WCAG 4.5:1 against the menu bar in both
-appearances. There are no exceptions.
+**Contrast floor.** The glyph is a template image and the system colours it, so
+its contrast against the menu bar is the system's own. §9.1 asserts **parity
+with the system's menu bar items**, measured, rather than a number against a
+modelled bar.
 
-`sleep` used to be one. #44 held it to the 3:1 non-text floor on the grounds
-that `.secondaryLabelColor` is dimmed by contract, and it shipped at 3.88:1 on
-a light bar — the state the buddy holds most of the time, and the only one not
-protected by the floor. "Quiet" and "below the floor" are different claims, so
-#89 dropped the exemption and pinned `sleep`'s two alphas here rather than
-inheriting whatever `.secondaryLabelColor` resolves to: white at 0.60 on a dark
-bar (was 0.549) and black at 0.55 on a light one (was 0.498).
+*The basis, and why it is a band of measured backgrounds rather than two greys.*
+Until #90 this section asserted 4.5:1 against sRGB grey 0.11 for the dark menu
+bar and 0.96 for the light one. Neither background occurs. Measured on macOS
+26.6.2 by sweeping the desktop picture from black to white and reading the bar
+back out of screen captures:
 
-**`sleep` stays the least assertive of the seven**, which is a conjunction, not
-a contrast ranking — a saturated pink at 4.84:1 (`heart`, dark bar) draws the
-eye harder than a grey at 6.85:1. `sleep` is the only tint that is achromatic
-*and* below full label strength; it is motionless; it carries at most 60% of
-`idle`'s contrast in either appearance (measured 55% dark, 33% light); and on
-the light bar, where all seven tints are values this repo pins rather than
-system colours, it is the lowest-contrast state of the set. Each clause is
-asserted in `Tests/ContextBuddyAppTests/StatusItemIconTests.swift`. The dark-bar
-ordering is not asserted, because three tints there are `.system*` colours and
-their ordering is a property of macOS.
+- **The menu bar is transparent, not translucent over a dark material.** It
+  reads rgb (0,0,0), L=0.0000 over a black desktop picture and rgb
+  (251,251,251), L=0.9647 over a white one. The modelled dark bar's L=0.011 is
+  not a near miss; the bar spans essentially the whole range.
+- **macOS switches the status item's effective appearance with the wallpaper's
+  brightness, while the system stays in Dark Mode.** A probe status item tinted
+  blue under `.darkAqua` and red under `.aqua` rendered blue over a black
+  picture and red over a white one. The appearance does track the bar — that
+  part of the model was always right.
+- **The two appearances cover disjoint bands.** Measured `.darkAqua`
+  L = [0.000, 0.195] and `.aqua` L = [0.546, 0.965]. The switch is a step:
+  desktop grey 160 gives a `.darkAqua` bar at L=0.195, grey 168 an `.aqua` bar
+  at L=0.546. **Nothing between 0.195 and 0.546 is reachable**, so a floor
+  asserted at L=0.35 — as an earlier draft of #90 proposed — would be asserted
+  against a background that does not exist.
 
-The floor is also why the three chromatic tints are appearance-dependent rather
-than the single system color each row used to name. `.systemOrange`, `.systemYellow`
-and `.systemPink` are legible on a dark bar and not on a light one: resolved
-and composited over sRGB grey 0.96 they measure 2.11:1, 1.38:1 and 3.34:1,
-with `celebrate` effectively invisible. The light-appearance hex values above
-are darkened variants of the same hue families, chosen so the three chromatic
-states stay at least 20 degrees apart in hue — darkening orange, yellow and
-pink far enough to clear 4.5:1 pulls all three toward a common brown, and
-three states that read alike are not a fix. Measured on the resolved tint,
-composited at its own alpha over sRGB grey 0.11 (dark bar) and 0.96 (light
-bar):
+*Why no tint could have worked.* Clearing 4.5:1 at the top of the `.darkAqua`
+band from the light side needs a glyph at L ≥ 1.052. Pure white is 1.0 and
+reaches 4.29:1. Going dark instead needs L ≤ −0.039. Both are impossible, so
+**no flat colour clears 4.5:1 across the `.darkAqua` band** — this is a proof
+about the band, not a tuning failure, and it is why #44, #87, #88 and #91 each
+optimised a tint table that could not have been made correct.
 
-| State | dark bar | light bar |
+*What ships instead, measured.* Ink versus its own local bar, from screen
+captures of the running status item, with Docker's icon measured in the same
+frames as the control:
+
+| menu bar | ContextBuddy | Docker |
 |---|---|---|
-| `sleep` | 6.85:1 | 4.66:1 |
-| `idle` / `busy` | 12.46:1 | 13.96:1 |
-| `attention` / `dizzy` | 7.63:1 | 4.79:1 |
-| `celebrate` | 12.06:1 | 4.82:1 |
-| `heart` | 4.84:1 | 5.27:1 |
+| L = 0.000 (black picture) | 16.83:1 | 16.79:1 |
+| L = 0.147 (the author's wallpaper) | 4.69:1 | 4.62:1 |
+| L = 0.188 (top of the `.darkAqua` band) | **3.92:1** | **3.93:1** |
+| L = 0.521 (bottom of the `.aqua` band) | 9.37:1 | 9.27:1 |
+| L = 0.956 (white picture) | 15.06:1 | 14.74:1 |
 
-Light-appearance hue separation: 25.6 degrees between `attention` and
-`celebrate`, 41.8 between `attention` and `heart`, 67.3 between `celebrate`
-and `heart`.
+ContextBuddy tracks the system's own menu bar items within 2% at every
+background. **The floor is 3.92:1, at the top of the `.darkAqua` band** — and
+that is a macOS ceiling, not a ContextBuddy defect: Docker measures 3.93:1 at
+the same background, and the arithmetic above shows nothing can exceed 4.29:1
+there. §9.1 states 3.92:1 rather than 4.5:1 because 4.5:1 is not reachable on
+this platform, and a floor the product cannot hold is what #90 was filed about.
 
-#37 changed four glyphs and no tints, and the table above was re-measured
-after that change rather than assumed to still hold — contrast is a property
-of the resolved tint, so those numbers were unchanged. #89 then moved `sleep`'s
-row, and only that row.
+`.labelColor` is **not** an acceptable substitute for leaving the tint nil. Its
+alpha lets the bar through: measured 8.84:1 where the untinted template measured
+15.06:1 on a white bar, and 4.29:1 against the untinted template's 4.69:1 on the
+author's wallpaper.
 
-Three constraints on anyone changing these values:
+*Which states carry a treatment.* **None.** #90 authorised a self-contrasting
+treatment — outline, shadow or backing shape — for any state that could not
+clear the band flat, and on the measured band that would have been all seven.
+The treatment is unnecessary because the sanctioned path already delivers
+system parity: a black rim measured a worst case of 2.98:1 across the
+`.darkAqua` band, and the only shape that reached 4.5:1 everywhere was a
+three-tone halo that read as a sticker set and moved ink coverage off its stated
+band. Reaching for a treatment before trying the platform's own mechanism was
+the error; it is recorded here so the next change does not repeat it.
 
-- Contrast is a property of the tint, not of the rendered glyph. An
-  alpha-weighted mean over a thin stroke is dominated by partially covered
-  edge pixels and measures the rasterizer rather than the color — the same
-  glyph reads 1.73:1 at 1x and 6.76:1 at 2x. Assert the floor on the resolved
-  tint, and assert glyph ink coverage separately so a legible tint cannot ship
-  as an invisible hairline.
-- The hex values are sRGB, and they round-trip through the generic RGB space
-  AppKit rasterizes into without a hue shift. A more saturated pink
-  (`#D80048`) clipped there and rendered 7 degrees off its declared hue, which
-  the rendered-hue test in `Tests/ContextBuddyAppTests/StatusItemIconTests.swift`
-  catches at a 5-degree tolerance.
-- `sleep`'s translucency is load-bearing and must not be flattened into an
-  opaque grey of the same measured contrast. A tint composited at alpha tracks
-  whatever shows through the translucent bar; an opaque one does not. Over the
-  mid-tone bar reported in #89 (sRGB 96,103,126) the light variant measures
-  2.40:1, where `#6F6F6F` — the opaque grey with the same 4.6:1 against the
-  modelled 0.96 bar — measures 1.12:1. The table above is still stated against
-  the two modelled greys; whether that model should be re-based on a
-  translucent bar at all is a separate open question.
+*What `sleep` lost.* §9.1 used to claim `sleep` is the least assertive of the
+seven, as a conjunction of four clauses, and colour carried three of them —
+`sleep` was the only tint that was achromatic *and* below full label strength,
+and the lowest-contrast state on a light bar. The system now draws all seven in
+one ink, so none of those can be true of `sleep` in particular. The drawing does
+not rescue the claim either: `moon.zzz` paints 11.07% of the glyph box against
+`busy` at 9.27%, `celebrate` at 9.72% and `heart` at 10.15%, so `sleep` is
+mid-pack rather than lightest. **What remains is that `sleep` is motionless and
+carries no colour of its own.** The guarantee is weaker than it was and is
+recorded here as weaker rather than restated in a form that is not true.
+
+Three constraints on anyone changing this:
+
+- **Do not set `contentTintColor`.** It is the mechanism, and the only reason
+  the glyph inverts with the bar. `StatusIconImageView.render` sets it to nil
+  explicitly, not by omission, because the view is reused across states.
+- **Do not set `isTemplate = false`.** A non-template image ignores the view's
+  colour entirely, so it ignores the system's choice too and draws SF Symbols'
+  own rendering — black for the monochrome symbols, the multicolor variant for
+  the rest (#34).
+- **Do not assert absolute contrast from an offscreen render.** There is no
+  vibrancy source in `xctest`, so an untinted template resolves to the
+  equivalent of `.secondaryLabelColor` — pure white at alpha 0.549 under
+  `.darkAqua`, pure black at alpha 0.502 under `.aqua` — and composites to
+  2.44:1 at the top of the `.darkAqua` band. That number describes the test
+  process, not the product. The suite asserts the *mechanism* (tint nil,
+  `isTemplate` true, ink at the achromatic pole of its appearance) and the
+  *direction* of the glyph against every background in the band; the absolute
+  numbers in the table above come from screen captures, and the PR that changes
+  them carries one. Assert glyph ink coverage separately, so a legible colour
+  cannot ship as an invisible hairline.
 
 ### 9.2 Animation policy
 

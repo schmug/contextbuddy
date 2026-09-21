@@ -6,158 +6,239 @@ import ContextBuddyCore
 // Coverage for the §9.1 icon contract (SPEC.md §9.1).
 //
 // The regression this guards (#34): NSImageView (like the NSButton that drew
-// the icon before #35) only recolors a *template* image with
-// `contentTintColor`. When the status item's image was marked
-// `isTemplate = false`, every per-state tint in IconStyle was discarded — four
-// of the seven states drew pure black, invisible on a dark menu bar, and the
-// rest drew SF Symbols' multicolor variants instead of §9.1's colors.
+// the icon before #35) only recolors a *template* image. When the status
+// item's image was marked `isTemplate = false`, every per-state tint in
+// IconStyle was discarded — four of the seven states drew pure black,
+// invisible on a dark menu bar, and the rest drew SF Symbols' multicolor
+// variants. #90 retired those tints in favour of the system's own colour, and
+// `isTemplate` became more load-bearing rather than less: it is now the only
+// channel through which the glyph gets any colour at all.
 //
 // The §9.2 motion section asserts on StatusItemIcon.Motion, the record the
 // hosted image view keeps of the effects it started: NSImageView exposes no
 // list of running symbol effects, and what plays on screen is a human check.
 //
-// Two kinds of assertion here, deliberately kept apart:
+// Three kinds of assertion here, deliberately kept apart:
 //
-//   * Contrast floors are computed from the *resolved tint color*, composited
-//     over the menu bar at its own alpha. This is what "is this tint legible
-//     against the menu bar" means, and it does not depend on how finely the
-//     glyph happens to be rasterized.
+//   * Contrast floors are computed from the *resolved ink colour*, read from a
+//     pixel the glyph fully covers, against each appearance's measured band of
+//     menu bar backgrounds (#90). A fully covered pixel carries the system's
+//     chosen colour exactly, at any raster scale.
 //
-//   * Everything measured from rendered pixels compares two renders taken
-//     under identical conditions (hue against the declared tint, one tint
-//     against another), so raster density cancels out.
+//   * Direction — which side of the bar the glyph lands on — is asserted from
+//     rendered pixels, because it is stable across raster scales even where
+//     magnitude is not.
 //
-// Absolute contrast must NOT be asserted on rendered pixels. An alpha-weighted
-// mean over a thin stroke is dominated by partially covered edge pixels, so the
-// same glyph measures 1.73:1 at 1x and 6.76:1 at 2x — that number describes the
-// rasterizer, not the color. An earlier revision of this file did exactly that
-// and passed locally while failing on CI.
+//   * Ink coverage and silhouette are asserted separately from contrast, so a
+//     legible colour cannot ship as an invisible hairline and two states
+//     cannot collapse into one shape now that colour no longer separates them.
+//
+// Absolute contrast must NOT be asserted on an alpha-weighted *mean* over
+// rendered pixels. That mean is dominated by partially covered edge pixels, so
+// the same glyph measures 1.73:1 at 1x and 6.76:1 at 2x — a number describing
+// the rasterizer, not the colour. An earlier revision of this file did exactly
+// that and passed locally while failing on CI. Reading one fully covered pixel
+// is not the same mistake; `resolvedInk` asserts the coverage before it trusts
+// the colour.
 //
 // Needs an NSApplication: `bitmapImageRepForCachingDisplay` and `cacheDisplay`
 // draw through AppKit, so `makeButton` bootstraps one.
 @MainActor
 final class StatusItemIconTests: XCTestCase {
 
-    // The menu bar is translucent over the wallpaper, so there is no single
-    // true value. These are the representative greys #34's measurements used.
-    private static let darkMenuBar = 0.11
-    private static let lightMenuBar = 0.96
+    // §9.1's contrast basis (#90). The menu bar is transparent, not a grey:
+    // measured on macOS 26.6.2 by sweeping the desktop picture from black to
+    // white and reading the bar back out of screen captures, it runs L=0.0000
+    // over a black picture to L=0.9647 over a white one. The two constants
+    // this replaced — sRGB 0.11 and 0.96 — described a bar that does not occur.
+    //
+    // macOS also switches the status item's *effective appearance* with the
+    // wallpaper's brightness while the system stays in Dark Mode, verified
+    // with a probe status item tinted blue under .darkAqua and red under
+    // .aqua. So each appearance covers its own band, and the bands are
+    // disjoint: wallpaper 160 gives a .darkAqua bar at L=0.195, wallpaper 168
+    // an .aqua bar at L=0.546, with nothing reachable in between. An earlier
+    // draft of this issue proposed asserting against L=0.35; no bar presents
+    // it.
+    //
+    // Luminances, not sRGB channel values. Colorimetry.grey(forLuminance:)
+    // converts, because `render` and the compositing below take a channel.
+    private static let darkAquaBand: [Double] = [0.000, 0.050, 0.120, 0.160, 0.195]
+    private static let aquaBand: [Double] = [0.546, 0.630, 0.750, 0.870, 0.965]
 
-    private static let menuBars: [(NSAppearance.Name, Double)] = [
-        (.darkAqua, darkMenuBar), (.aqua, lightMenuBar)
+    private static let bands: [(NSAppearance.Name, [Double])] = [
+        (.darkAqua, darkAquaBand), (.aqua, aquaBand)
     ]
 
-    // MARK: - Contrast floors, from the resolved tint
+    // The floor §9.1 commits to, and it is a ceiling as much as a floor: pure
+    // white over the top of the .darkAqua band (L=0.195) is 4.29:1, so 4.5:1
+    // is not reachable there by any colour, tinted or system-supplied. macOS
+    // does not reach it either — Docker's icon measured 3.93:1 at that
+    // background in the same capture as ContextBuddy's 3.92:1. Raising this
+    // above 4.29 asserts something no menu bar icon on this platform can do.
+    private static let contrastFloor = 4.2
 
-    // Every §9.1 tint against the dark menu bar. This is where #34 lived: four
-    // states drew black there. Measured 4.84:1 (heart) to 12.46:1 (idle/busy).
-    func testEveryTintClearsAAContrastOnTheDarkMenuBar() {
+    // One background per appearance, for the tests that are about ink or
+    // shape rather than about the band. Interior points, not extremes.
+    private static let menuBars: [(NSAppearance.Name, Double)] = [
+        (.darkAqua, Colorimetry.grey(forLuminance: 0.050)),
+        (.aqua, Colorimetry.grey(forLuminance: 0.870))
+    ]
+
+    // MARK: - §9.1 contrast, from the resolved ink
+
+    // The mechanism the whole floor now rests on (#90). Every glyph ships as a
+    // template image with `contentTintColor` nil, which is what lets the system
+    // colour it against the bar. Declaring any colour opts the glyph out of
+    // that and pins it to one side, which is how five of the seven states came
+    // to sit below their stated floor on a real screen.
+    //
+    // This is the cheapest test in the file and the one that matters most: the
+    // numbers in §9.1 are measured on a real menu bar, and the only thing a
+    // unit test can hold is that the mechanism producing them is still engaged.
+    func testEveryStateShipsAnUntintedTemplateSoTheSystemColoursIt() {
         for state in BuddyState.allCases {
-            let ratio = tintContrast(state, appearance: .darkAqua, background: Self.darkMenuBar)
-            XCTAssertGreaterThanOrEqual(
-                ratio, 4.5,
-                "\(state.rawValue) on the dark menu bar: \(Colorimetry.f(ratio)):1"
+            let button = makeButton(appearance: .darkAqua)
+            StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
+            guard let view = StatusItemIcon.imageView(in: button) else {
+                XCTFail("\(state.rawValue): apply installed no StatusIconImageView"); continue
+            }
+            XCTAssertNil(
+                view.contentTintColor,
+                "\(state.rawValue) declares a tint. That opts the glyph out of the system's "
+                + "inversion against the menu bar (§9.1, #90) — the bar is transparent and the "
+                + "system, not this repo, picks the colour."
+            )
+            XCTAssertEqual(
+                view.image?.isTemplate, true,
+                "\(state.rawValue) is not a template image, so the system cannot colour it"
             )
         }
     }
 
-    // The same floor on the light menu bar, which is where #44 lived: §9.1's
-    // plain `.systemOrange`/`.systemYellow`/`.systemPink` measured 1.38:1 to
-    // 3.34:1 against a near-white bar, `celebrate` close to invisible. §9.1 now
-    // names a darkened light-appearance variant for each, and this is the
-    // assertion those variants exist to satisfy.
+    // What the resolved ink is, and why the absolute floor is NOT asserted here.
     //
-    // There is no longer an exception. `sleep` was held to the 3:1 non-text
-    // floor on the grounds that `.secondary` is dimmed by contract, and it
-    // measured 3.88:1 here; #89 dropped that exemption, because "quiet" and
-    // "below the floor" are different claims and `sleep` is the state the buddy
-    // holds most of the time. It now measures 4.66:1 — still the lowest of the
-    // seven on this bar, which testSleepStaysTheQuietestState pins.
-    func testEveryTintClearsItsFloorOnTheLightMenuBar() {
-        for state in BuddyState.allCases {
-            let ratio = tintContrast(state, appearance: .aqua, background: Self.lightMenuBar)
-            XCTAssertGreaterThanOrEqual(
-                ratio, 4.5,
-                "\(state.rawValue) on the light menu bar: \(Colorimetry.f(ratio)):1"
-            )
+    // Offscreen there is no menu bar and no vibrancy source, and the view sets
+    // `allowsVibrancy`, so an untinted template resolves to the equivalent of
+    // `.secondaryLabelColor` — measured pure white at alpha 0.549 under
+    // .darkAqua and pure black at alpha 0.502 under .aqua, identical for all
+    // seven states. On a real bar the same glyph measures ink at rgb 230-242
+    // on a dark bar and 27-35 on a light one. Compositing the offscreen colour
+    // over a band background yields 2.44:1 at the top of the .darkAqua band,
+    // which describes `xctest` and not the product.
+    //
+    // So §9.1's numbers are measured from a screen capture of the running
+    // status item and recorded there; the PR that changes them carries the
+    // capture. Asserting a fabricated offscreen ratio is the mistake #90 was
+    // filed about, and it is not repeated here in the other direction.
+    //
+    // What offscreen rendering *can* prove, and what this asserts, is that the
+    // ink is the achromatic pole of its appearance: white on a dark bar, black
+    // on a light one, with no hue of its own. A tint creeping back in — the
+    // regression this whole change removes — fails here immediately, because
+    // every one of §9.1's retired tints carried either a hue or the wrong pole.
+    func testResolvedInkIsTheAchromaticPoleOfItsAppearance() {
+        for (appearance, _) in Self.bands {
+            let wantsWhite = appearance == .darkAqua
+            for state in BuddyState.allCases {
+                let ink = resolvedInk(state, appearance: appearance)
+                XCTAssertGreaterThan(
+                    ink.alpha, 0.3,
+                    "\(state.rawValue) on \(appearance.rawValue) painted no ink to read"
+                )
+                let (red, green, blue) = ink.rgb
+                let high = max(red, max(green, blue))
+                let low = min(red, min(green, blue))
+                XCTAssertEqual(
+                    high - low, 0, accuracy: 0.02,
+                    "\(state.rawValue) on \(appearance.rawValue) carries a hue: rgb "
+                    + "\(Colorimetry.f(red)), \(Colorimetry.f(green)), \(Colorimetry.f(blue)). "
+                    + "The system colours the glyph now — nothing may set contentTintColor."
+                )
+                if wantsWhite {
+                    XCTAssertGreaterThan(high, 0.98,
+                                         "\(state.rawValue) on a dark bar resolves to "
+                                         + "\(Colorimetry.f(high)), not the white pole")
+                } else {
+                    XCTAssertLessThan(low, 0.02,
+                                      "\(state.rawValue) on a light bar resolves to "
+                                      + "\(Colorimetry.f(low)), not the black pole")
+                }
+            }
         }
     }
 
-    // #89's other half: raising `sleep` to the floor must not make it shout.
+    // The property that makes one band belong to one appearance: the glyph
+    // lands on the opposite side of the bar from the bar itself, at every
+    // background in that appearance's band. A colour hardcoded to one side
+    // inverts the other half of the range, and direction is stable across
+    // raster scales even though magnitude is not.
     //
-    // "Least assertive" is not the same as "lowest luminance contrast" — a
-    // saturated pink at 4.84:1 (`heart`, dark bar) draws the eye harder than a
-    // grey at 6.85:1 — so the claim §9.1 makes is a conjunction, and each
-    // clause is asserted here:
+    // Before #90 this covered only sleep/idle/busy, the three achromatic
+    // states. Now that the system colours all seven, all seven must invert.
+    func testEveryStateInvertsAgainstTheBarAcrossTheWholeBand() {
+        for (appearance, band) in Self.bands {
+            let darkBar = appearance == .darkAqua
+            for state in BuddyState.allCases {
+                for luminance in band {
+                    let background = Colorimetry.grey(forLuminance: luminance)
+                    let measured = render(state, appearance: appearance, background: background)
+                    let glyph = measured.luminance
+                    let bar = measured.backgroundLuminance
+                    if darkBar {
+                        XCTAssertGreaterThan(
+                            glyph, bar,
+                            "\(state.rawValue) should draw lighter than a .darkAqua bar at L="
+                            + "\(Colorimetry.f(luminance)); got glyph \(Colorimetry.f(glyph))"
+                        )
+                    } else {
+                        XCTAssertLessThan(
+                            glyph, bar,
+                            "\(state.rawValue) should draw darker than an .aqua bar at L="
+                            + "\(Colorimetry.f(luminance)); got glyph \(Colorimetry.f(glyph))"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // §9.1 used to claim `sleep` is the least assertive of the seven, and #90
+    // took that claim away rather than rehoming it. It was a conjunction, and
+    // colour carried three of its four clauses: `sleep` was the only tint that
+    // was achromatic AND below full label strength, and it was the lowest
+    // contrast of the set on a light bar. The system now draws all seven in
+    // one ink, so none of those can be true of `sleep` in particular.
     //
-    //   * `sleep` is the only tint that is achromatic AND below full label
-    //     strength. `idle`/`busy` are achromatic too but take `.labelColor`
-    //     outright; the other four carry a hue.
-    //   * It is motionless. `idle` is too; the remaining five animate.
-    //   * It carries at most 60% of `idle`'s contrast in both appearances
-    //     (measured 55% dark, 33% light) — expressed against `idle` rather than
-    //     as an absolute ceiling so it does not drift when `.labelColor` does.
-    //   * On the light bar, where every one of the seven tints is a value this
-    //     repo pins rather than a system color, it is the lowest of the set.
-    //     Not asserted on the dark bar: three tints there are `.system*`
-    //     colors, so their ordering is a property of macOS, not of this repo.
-    func testSleepStaysTheQuietestState() {
+    // Nor does the drawing rescue it. Measured through one opaque tint,
+    // `moon.zzz` paints 11.07% of the glyph box against `busy` at 9.27%,
+    // `celebrate` at 9.72% and `heart` at 10.15% — `sleep` is mid-pack, not
+    // the lightest. Asserting otherwise would be asserting something false.
+    //
+    // What is left is real but small, and it is all this pins: `sleep` is
+    // motionless, and it carries no colour of its own — its ink is the same
+    // ink every other state gets, which is what stops a future change from
+    // quietly re-dimming it the way #89 and #91 had to undo. SPEC §9.1 records
+    // the loss rather than pretending the guarantee survived.
+    //
+    // Only the ink's *colour* is compared, never `resolvedInk`'s alpha. That
+    // alpha says how completely the stroke covers its best-covered pixel,
+    // which is a property of the symbol's artwork and the rasterizer, not of
+    // the colour: locally every glyph reached the same 0.549, while the CI
+    // runner's SF Symbols set produced 0.471 to 0.549 across the seven and
+    // failed an equality that had nothing to do with what it claimed to test.
+    func testSleepCarriesNoColourOfItsOwnAndDoesNotMove() {
         let sleep = IconStyle.style(for: .sleep, animationsEnabled: true)
         XCTAssertEqual(sleep.animation, .none, "sleep must not animate")
 
-        for (appearance, background) in Self.menuBars {
-            let saturation = self.saturation(of: sleep.tint, in: appearance)
-            XCTAssertEqual(saturation, 0, accuracy: 0.001,
-                           "sleep on \(appearance.rawValue) is not achromatic: saturation "
-                           + "\(Colorimetry.f(saturation))")
-
-            // Spelled out rather than inlined into the interpolation: arithmetic
-            // inside a message expression is what blew the type checker's
-            // budget on 6.4 elsewhere in this file (CLAUDE.md, Swift 6.1.2).
-            let quiet = tintContrast(.sleep, appearance: appearance, background: background)
-            let loud = tintContrast(.idle, appearance: appearance, background: background)
-            let share: Double = quiet / loud
-            let percent: Double = share * 100
-            XCTAssertLessThanOrEqual(
-                share, 0.6,
-                "sleep on \(appearance.rawValue) carries \(Colorimetry.f(percent))% of "
-                + "idle's contrast (\(Colorimetry.f(quiet)):1 against \(Colorimetry.f(loud)):1)"
-            )
-        }
-
-        let quiet = tintContrast(.sleep, appearance: .aqua, background: Self.lightMenuBar)
-        for state in BuddyState.allCases where state != .sleep {
-            let other = tintContrast(state, appearance: .aqua, background: Self.lightMenuBar)
-            XCTAssertLessThan(
-                quiet, other,
-                "sleep is no longer the quietest tint on the light menu bar: "
-                + "\(Colorimetry.f(quiet)):1 against \(state.rawValue)'s \(Colorimetry.f(other)):1"
-            )
-        }
-    }
-
-    // Darkening orange, yellow and pink far enough to clear 4.5:1 against a
-    // near-white bar drags all three toward brown, and a fix that buys
-    // luminance by making the three chromatic states read alike has not fixed
-    // anything — hue is how a glance tells them apart. §9.1's light variants
-    // are pinned at least 20 degrees apart; measured 25.6 degrees for the
-    // closest pair (attention/celebrate) and 67.3 for the widest
-    // (celebrate/heart). The dark bar keeps §9.1's system colors and is not
-    // asserted here: its gap is a property of macOS, not of this repo.
-    //
-    // dizzy is absent because §9.1 gives it attention's orange on purpose.
-    func testChromaticTintsStayMutuallyDistinguishableOnTheLightMenuBar() {
-        let distinct: [BuddyState] = [.attention, .celebrate, .heart]
-        for (index, first) in distinct.enumerated() {
-            for second in distinct[(index + 1)...] {
-                let apart = Colorimetry.hueDistance(
-                    hue(of: IconStyle.style(for: first, animationsEnabled: false).tint, in: .aqua),
-                    hue(of: IconStyle.style(for: second, animationsEnabled: false).tint, in: .aqua)
-                )
-                XCTAssertGreaterThanOrEqual(
-                    apart, 20,
-                    "\(first.rawValue) and \(second.rawValue) are only "
-                    + "\(Colorimetry.f(apart)) degrees apart in hue on the light menu bar"
+        for (appearance, _) in Self.bands {
+            let quiet = resolvedInk(.sleep, appearance: appearance)
+            for state in BuddyState.allCases where state != .sleep {
+                let other = resolvedInk(state, appearance: appearance)
+                XCTAssertEqual(
+                    Colorimetry.distance(quiet.rgb, other.rgb), 0, accuracy: 0.01,
+                    "sleep's ink on \(appearance.rawValue) differs from \(state.rawValue)'s. "
+                    + "sleep is dimmed by symbol and stillness now, not by colour (§9.1, #90)."
                 )
             }
         }
@@ -180,67 +261,24 @@ final class StatusItemIconTests: XCTestCase {
         }
     }
 
-    // MARK: - Appearance adaptivity
+    // MARK: - The template reaches the pixels
 
-    // sleep/idle/busy are the achromatic states: `idle`/`busy` take
-    // `.labelColor` and `sleep` a dynamic white/black pinned in IconStyle, and
-    // both must resolve per appearance rather than to one variant. The
-    // invariant is the *direction*: the glyph lands on the opposite side of its
-    // own background in each appearance. Direction is stable across raster
-    // scales even though the magnitude is not, and a hardcoded white inverts
-    // the light half.
-    func testAdaptiveStatesResolveAgainstTheButtonAppearance() {
-        for state in [BuddyState.sleep, .idle, .busy] {
-            let onDark = render(state, appearance: .darkAqua, background: Self.darkMenuBar)
-            XCTAssertGreaterThan(
-                onDark.luminance, onDark.backgroundLuminance,
-                "\(state.rawValue) should draw lighter than the dark menu bar; got glyph "
-                + "\(Colorimetry.f(onDark.luminance)) vs bar \(Colorimetry.f(onDark.backgroundLuminance))"
-            )
-
-            let onLight = render(state, appearance: .aqua, background: Self.lightMenuBar)
-            XCTAssertLessThan(
-                onLight.luminance, onLight.backgroundLuminance,
-                "\(state.rawValue) should draw darker than the light menu bar; got glyph "
-                + "\(Colorimetry.f(onLight.luminance)) vs bar \(Colorimetry.f(onLight.backgroundLuminance))"
-            )
-        }
-    }
-
-    // MARK: - The tint reaches the pixels
-
-    // The chromatic states must render at the IconStyle tint's own hue, not at
-    // SF Symbols' multicolor variant. With #34 present, `attention` drew
-    // multicolor yellow (~22 degrees off systemOrange) and `heart` multicolor
-    // red (~11 degrees off systemPink). Hue drifts by at most 0.3 degrees
-    // across raster scales, so the 5 degree tolerance is about the color, not
-    // the rasterizer.
-    func testChromaticStatesRenderAtTheDeclaredTintHue() {
-        for state in [BuddyState.attention, .celebrate, .dizzy, .heart] {
-            for (appearance, background) in Self.menuBars {
-                let measured = render(state, appearance: appearance, background: background)
-                let declared = hue(of: IconStyle.style(for: state, animationsEnabled: false).tint,
-                                   in: appearance)
-                XCTAssertEqual(
-                    Colorimetry.hueDistance(measured.hue, declared), 0, accuracy: 5,
-                    "\(state.rawValue) on \(appearance.rawValue): rendered hue "
-                    + "\(Colorimetry.f(measured.hue)) vs declared tint hue \(Colorimetry.f(declared))"
-                )
-            }
-        }
-    }
-
-    // The direct guard on `isTemplate`, and the one that also covers
-    // `celebrate`, whose multicolor variant happens to match systemYellow and
-    // so slips past the hue test. A non-template image ignores
-    // `contentTintColor` entirely, so two different tints produce
-    // byte-identical pixels: separation is exactly 0.000 at every raster scale
-    // when the bug is present, against 0.149 or better when it is not.
+    // The direct guard on `isTemplate` (#34), which #90 made load-bearing
+    // twice: a non-template image ignores the view's colour entirely, so it
+    // ignores the system's choice too and draws SF Symbols' own rendering.
+    //
+    // Forcing a tint is the only way to detect that from pixels, so this test
+    // sets one deliberately — it is the one place in the suite that does, and
+    // it proves the channel the system colours the glyph through is open. Two
+    // different forced tints produce byte-identical pixels when the bug is
+    // present: separation is exactly 0.000 at every raster scale, against
+    // 0.149 or better when it is not.
     func testSwappingTheTintChangesTheRenderedPixels() {
+        let background = Self.menuBars[0].1
         for state in BuddyState.allCases {
-            let blue = render(state, appearance: .darkAqua, background: Self.darkMenuBar,
+            let blue = render(state, appearance: .darkAqua, background: background,
                               overrideTint: .systemBlue)
-            let green = render(state, appearance: .darkAqua, background: Self.darkMenuBar,
+            let green = render(state, appearance: .darkAqua, background: background,
                                overrideTint: .systemGreen)
             let apart = Colorimetry.distance(blue.rgb, green.rgb)
             XCTAssertGreaterThan(
@@ -358,7 +396,7 @@ final class StatusItemIconTests: XCTestCase {
     func testInkCoverageAcrossTheSetStaysInsideTheStatedBand() {
         var measured: [(BuddyState, Double)] = []
         for state in BuddyState.allCases {
-            let opaque = render(state, appearance: .darkAqua, background: Self.darkMenuBar,
+            let opaque = render(state, appearance: .darkAqua, background: Self.menuBars[0].1,
                                 overrideTint: .white)
             measured.append((state, opaque.inkCoverage))
         }
@@ -619,23 +657,42 @@ extension StatusItemIconTests {
         return button
     }
 
-    // WCAG contrast of a state's declared tint against a menu bar background,
-    // resolved under `appearance` and composited at the tint's own alpha.
-    // `sleep` and `.labelColor` are semi-transparent, so the alpha matters.
-    func tintContrast(_ state: BuddyState, appearance: NSAppearance.Name, background: Double) -> Double {
-        let tint = IconStyle.style(for: state, animationsEnabled: false).tint
-        var rgba = (0.0, 0.0, 0.0, 1.0)
-        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
-            guard let c = tint.usingColorSpace(.sRGB) else { return }
-            rgba = (Double(c.redComponent), Double(c.greenComponent),
-                    Double(c.blueComponent), Double(c.alphaComponent))
+    // The colour the system resolved for a state's glyph, read from a pixel
+    // the stroke *fully* covers. Returns the best-covered pixel's colour and
+    // its alpha, so a caller can assert the coverage was real before trusting
+    // the colour — a partially covered pixel carries the background too, which
+    // is the measurement error this file exists to avoid.
+    //
+    // Rendered with no tint override, so this is exactly what ships.
+    func resolvedInk(
+        _ state: BuddyState,
+        appearance: NSAppearance.Name
+    ) -> (rgb: (Double, Double, Double), alpha: Double) {
+        let button = makeButton(appearance: appearance)
+        StatusItemIcon.apply(state: state, animationsEnabled: false, to: button)
+        let pixels = Self.buttonPoints * Self.renderScale
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: pixels, pixelsHigh: pixels,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0
+        ) else {
+            XCTFail("could not allocate a bitmap for \(state.rawValue)")
+            return ((0, 0, 0), 0)
         }
-        let a = rgba.3
-        let composited = (rgba.0 * a + background * (1 - a),
-                          rgba.1 * a + background * (1 - a),
-                          rgba.2 * a + background * (1 - a))
-        return Colorimetry.contrastRatio(Colorimetry.luminance(composited),
-                                         Colorimetry.luminance((background, background, background)))
+        rep.size = button.bounds.size
+        button.cacheDisplay(in: button.bounds, to: rep)
+
+        var best = ((0.0, 0.0, 0.0), 0.0)
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let px = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                let alpha = Double(px.alphaComponent)
+                guard alpha > best.1 else { continue }
+                let rgb = (Double(px.redComponent), Double(px.greenComponent), Double(px.blueComponent))
+                best = (rgb, alpha)
+            }
+        }
+        return (best.0, best.1)
     }
 
     // Renders one state offscreen. Returns the alpha-weighted mean of the glyph
@@ -731,27 +788,6 @@ extension StatusItemIconTests {
         return view.motion
     }
 
-    // HSV saturation of a resolved tint. Zero means the tint carries no hue at
-    // all, which is what makes `sleep` and `idle`/`busy` achromatic.
-    func saturation(of color: NSColor, in appearance: NSAppearance.Name) -> Double {
-        var rgb = (0.0, 0.0, 0.0)
-        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
-            guard let c = color.usingColorSpace(.sRGB) else { return }
-            rgb = (Double(c.redComponent), Double(c.greenComponent), Double(c.blueComponent))
-        }
-        let mx = max(rgb.0, rgb.1, rgb.2), mn = min(rgb.0, rgb.1, rgb.2)
-        return mx <= 0 ? 0 : (mx - mn) / mx
-    }
-
-    // Resolves a dynamic NSColor under `appearance` and returns its hue.
-    func hue(of color: NSColor, in appearance: NSAppearance.Name) -> Double {
-        var rgb = (0.0, 0.0, 0.0)
-        NSAppearance(named: appearance)?.performAsCurrentDrawingAppearance {
-            guard let c = color.usingColorSpace(.sRGB) else { return }
-            rgb = (Double(c.redComponent), Double(c.greenComponent), Double(c.blueComponent))
-        }
-        return Colorimetry.hue(rgb)
-    }
 }
 
 // MARK: - Colorimetry
@@ -782,6 +818,16 @@ enum Colorimetry {
 
     static func contrastRatio(_ a: Double, _ b: Double) -> Double {
         (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
+    // The sRGB channel value of the grey whose relative luminance is `L` — the
+    // inverse of `luminance` for an achromatic colour. §9.1's bands are stated
+    // as luminances because that is what a menu bar capture is measured in,
+    // and `render` takes a channel.
+    static func grey(forLuminance luminance: Double) -> Double {
+        if luminance <= 0.0031308 { return luminance * 12.92 }
+        let encoded: Double = pow(luminance, 1 / 2.4)
+        return 1.055 * encoded - 0.055
     }
 
     // HSV hue in degrees; NaN for achromatic input.
