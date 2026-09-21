@@ -22,6 +22,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$PLUGIN_ROOT/lib/config.sh"
 # shellcheck source=../lib/job.sh
 . "$PLUGIN_ROOT/lib/job.sh"
+# shellcheck source=../lib/grader_status.sh
+. "$PLUGIN_ROOT/lib/grader_status.sh"
 
 log_err() { printf 'contextbuddy: %s\n' "$1" >&2; }
 
@@ -69,6 +71,9 @@ LOOP_WINDOW="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "loop_window_tur
 LOOP_EDITS_IN_WINDOW="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "loop_edits_in_window" 3)"
 GRADER_MODEL="$(toml_get_section_key "$CONFIG_PATH" "grader" "model")"
 GRADER_MODEL="${GRADER_MODEL:-claude-haiku-4-5-20251001}"
+# Named in grader_status.json (§4.10); see user_prompt_submit.sh.
+GRADER_BACKEND="$(toml_get_section_key "$CONFIG_PATH" "grader" "backend")"
+GRADER_BACKEND="${GRADER_BACKEND:-anthropic}"
 CONTEXT_PRESSURE_PCT="$(toml_get_section_int "$CONFIG_PATH" "thresholds" "context_pressure_pct" 85)"
 # [grader.typesafe].harm_action (issue #7): see user_prompt_submit.sh. Read only to name the
 # firing signals in the suggestions.md harm section below.
@@ -157,13 +162,16 @@ build_job "post" "$TURN" "$TIMESTAMP" "$HOOK_PAYLOAD" \
   "$(session_md_path "$PROJECT_HASH")" "$(history_jsonl_path "$PROJECT_HASH")" "$CONFIG_PATH" "$CTX" \
   > "$JOB_FILE" 2>/dev/null || printf '{}' > "$JOB_FILE"
 
+# The exit code is kept rather than swallowed; see user_prompt_submit.sh.
 GRADE_JSON="$(CONTEXTBUDDY_JOB="$JOB_FILE" "$PLUGIN_ROOT/grader/invoke.sh" \
   "$PLUGIN_ROOT/grader/system_prompt.md" \
   "$INPUT_FILE" \
   "$GRADER_MODEL" \
-  "$CONFIG_PATH" 2>/dev/null || true)"
+  "$CONFIG_PATH")"
+GRADER_RC=$?
 
 if [ -z "$GRADE_JSON" ]; then
+  write_grader_status "$PROJECT_HASH" "post" "$TURN" "$TIMESTAMP" "$GRADER_BACKEND" "$GRADER_RC" "false"
   log_err "grader returned no output for turn $TURN (post); skipping"
   exit 0
 fi
@@ -176,6 +184,7 @@ if command -v jq >/dev/null 2>&1; then
     and (.scores.drift.value | type == "number")
     and (.scores.pollution.value | type == "number")
   ' >/dev/null 2>&1; then
+    write_grader_status "$PROJECT_HASH" "post" "$TURN" "$TIMESTAMP" "$GRADER_BACKEND" 4 "false"
     log_err "grade output failed schema validation (post); skipping"
     exit 0
   fi
@@ -253,6 +262,9 @@ HISTORY_PATH="$(history_jsonl_path "$PROJECT_HASH")"
 printf '%s\n' "$GRADE_JSON" | atomic_write "$TURN_PATH"
 printf '%s\n' "$GRADE_JSON" | atomic_write "$LAST_PATH"
 printf '%s\n' "$GRADE_JSON" >> "$HISTORY_PATH"
+
+# Recorded on the happy path too (§4.10); see user_prompt_submit.sh.
+write_grader_status "$PROJECT_HASH" "post" "$TURN" "$TIMESTAMP" "$GRADER_BACKEND" 0 "true"
 
 if command -v jq >/dev/null 2>&1; then
   DOMINANT="$(printf '%s' "$GRADE_JSON" | jq -r '.dominant_signal // empty')"

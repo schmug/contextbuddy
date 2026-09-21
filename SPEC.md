@@ -128,6 +128,7 @@ contextbuddy/
 │   └── lib/
 │       ├── project_hash.sh             # sha256(realpath(absolute_path))[:12]
 │       ├── session_paths.sh            # resolves all paths from project hash
+│       ├── grader_status.sh            # records why a grade did not happen (§4.10)
 │       └── transcript.sh               # sliding window assembly
 └── docs/
     └── (empty in v1; future expansion target)
@@ -320,6 +321,47 @@ Project identity for the session directory. The project hash is one-way, so this
 Deliberately *not* a field on `last.json`: project identity is session metadata rather than a graded score, `last.json` is version-gated as the grader's validated output schema (§4.1), and the project name must be correct from turn one rather than only after the first successful grade.
 
 The buddy treats this file as optional. When it is absent or unparseable, the popover's project footer row falls back to the project-hash prefix (§9.3).
+
+### 4.10 `grader_status.json`
+
+The outcome of the last grader attempt for this session directory. Written atomically by both hooks on **every** attempt, whatever the result, and never by the buddy.
+
+It exists because §13's "log and skip" was unobservable in practice (issue #92). A grader that could not run — most often because its credential is not reachable from the project the hook fired in — created the session directory, wrote `meta.json` and `turns/.counter`, logged one line to stderr and exited 0. Hook stderr is surfaced nowhere a user looks, so "the grader has no key" and "nobody typed anything" were the same picture: no file, no log, and a buddy holding `sleep`. On the reporting install, 22 of 37 session directories had no grade and no explanation.
+
+```json
+{
+  "schema_version": 1,
+  "timestamp": "2026-09-20T18:14:02Z",
+  "phase": "pre",
+  "turn": 7,
+  "backend": "typesafe",
+  "status": "error",
+  "reason": "missing_key",
+  "detail": "The typesafe backend has no credential. Export it in the environment Claude Code inherits, or put it in a .env in this project, its worktree root, or the main checkout (plugin/lib/dotenv.sh). See the hook stderr for which variable."
+}
+```
+
+**Field rules**:
+
+- `schema_version` — always `1` in v1.
+- `timestamp`, `phase`, `turn` — the attempt, matching the grade that would have been written. `phase` is `pre` or `post`.
+- `backend` — the resolved `[grader].backend`, so the trace names what could not run.
+- `status` — one of:
+
+  | `status` | Meaning |
+  |---|---|
+  | `ok` | A grade was produced and written. `reason` is `null`. |
+  | `skipped` | The grader ran and declined to grade this turn. Not a fault. |
+  | `error` | No grade. `reason` says which class. |
+
+- `reason` — `null` when `status` is `ok`, otherwise one of `not_a_task`, `missing_key`, `not_configured`, `transport_failure`, `invalid_response`. **Derived from `grader/invoke.sh`'s exit code, never from its stderr**: 2 → `not_configured`, 3 → `transport_failure`, 4 → `invalid_response`, 5 → `missing_key`, and exit 0 with no output → `not_a_task` (the typesafe `is_task` gate declining the turn). A `grader_status.json` write is not itself a grade, so nothing here reaches `history.jsonl` (§4.2).
+- `detail` — one fixed sentence per `reason`, authored in `plugin/lib/grader_status.sh`. **Nothing the backend printed is copied into it.** Backend stderr can carry an echoed `Authorization` header, a key in an error body, or arbitrary response text, and this file sits unencrypted beside the grades. The backend's own lines still go to the hook's stderr; they are simply not persisted. `Tests/plugin/test_grader_status.sh` pins this.
+
+**Last attempt wins.** The condition being reported is persistent, and overwriting on every attempt is what lets a credential that starts working clear the warning on the very next turn — and what makes a credential that *dies mid-session* visible at all. That is the failure that otherwise hides completely: `last.json` still holds a healthy grade, the meters still render, and nothing else on disk says that grading stopped.
+
+**The buddy treats this file as optional and decodes it leniently.** Absent means "no attempt recorded" — every directory written before this record existed — and the UI shows nothing extra. An unrecognized `status` or `reason` (a newer plugin beside an older app) degrades to unknown rather than failing the decode, because failing would restore exactly the state this record exists to end. Only `status: "error"` raises a user-visible signal; `skipped` is the grader working.
+
+**Surfacing** (§9.3, §9.4): one orange popover row above the scores, one added line on the menubar tooltip and accessibility label, and one disabled right-click menu item. All three name the backend and the reason class only — `detail` stays in the file and the tooltip. The §9.1 glyph, tint and motion are untouched: the seven states each mean something about the conversation, and a grader fault means something about the tooling. No new state, and §9.6 still holds — no notification, no sound, no window.
 
 ---
 
@@ -685,15 +727,191 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 
 ### 9.1 Icon mapping
 
-| State | SF Symbol | Tint | Animation |
-|---|---|---|---|
-| `sleep` | `moon.zzz` | `.secondary` (dimmed) | none |
-| `idle` | `circle` | `.primary` | none |
-| `busy` | `circle.dotted` | `.primary` | subtle rotation, indefinite |
-| `attention` | `exclamationmark.triangle` | `.orange` | 300ms scale pulse on transition (one-shot) |
-| `celebrate` | `sparkles` | `.yellow` | `.symbolEffect(.bounce)`, ~2.5s |
-| `dizzy` | `exclamationmark.arrow.circlepath` | `.orange` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
-| `heart` | `heart.fill` | `.pink` | `.symbolEffect(.pulse)` once, hold ~3s |
+| State | SF Symbol | Animation |
+|---|---|---|
+| `sleep` | `moon.zzz` | none |
+| `idle` | `record.circle` | none |
+| `busy` | `progress.indicator` | subtle rotation, indefinite |
+| `attention` | `exclamationmark.triangle` | 300ms scale pulse on transition (one-shot) |
+| `celebrate` | `sparkles` | `.symbolEffect(.bounce)`, ~2.5s |
+| `dizzy` | `repeat` | `.symbolEffect(.wiggle, options: .repeating)` while in state |
+| `heart` | `heart` | `.symbolEffect(.pulse)` once, hold ~3s |
+
+**There is no tint column, and adding one back is a regression.** Every glyph
+ships as a template image with `contentTintColor` left nil, and the system
+colours it. That is the menu bar extra contract Apple states: "Both interface
+icons and symbols use black and clear colors to define their shapes; the system
+can apply other colors to the black areas in each image so it looks good on both
+dark and light menu bars, and when your menu bar extra is selected." Declaring a
+colour opts the glyph out of that and pins it to one side of a bar whose
+brightness the app does not control. §9.1 carried a seven-row tint table until
+#90; "Contrast floor" below is the measurement that retired it.
+
+Colour therefore no longer separates the seven states — **silhouette carries all
+of it**, which is why the separations below are load-bearing rather than
+decorative.
+
+All seven are built through one shared `NSImage.SymbolConfiguration(pointSize:
+15, weight: .regular)`, so the set has a single type size. Before #37 there was
+no configuration at all and each symbol drew at its own natural metrics —
+widths of 15, 16 and 17pt, heights of 14, 15 and 17pt.
+
+That does **not** make `image.size` equal across the seven, and it must not be
+made equal. SF Symbols have different aspect ratios, so the only way to force
+one size is to draw each glyph into a fixed canvas — which replaces the
+`NSSymbolImageRep` with an `NSCustomImageRep`, and the symbol layers every
+animation above depends on go with it (measured: `isSymbolImage` 1 → 0). The
+status item does not change width regardless: `StatusItemIcon.length` is fixed
+at 28pt, a 22pt glyph box plus 3pt each side. 15pt is the largest size
+at which every glyph still fits that box, and the image view scales nothing, so
+a wider glyph is clipped rather than shrunk — `infinity` at 23pt was rejected
+for exactly that.
+
+Every symbol above exists in the macOS 15 SF Symbols set, which is the floor
+`Package.swift` declares. Verified against CoreGlyphs'
+`name_availability.plist` rather than by trying them on a newer machine: an
+unknown name makes `NSImage(systemSymbolName:)` return nil and the buddy
+renders a blank menu bar with no error anywhere.
+
+**Distinct silhouettes.** Because §9.6 gives the buddy no notification, no
+sound and no window, two states that look alike are two states the product
+cannot tell apart. Shape carries that load **alone**: since #90 the system
+draws all seven states in one ink, so there is no colour left to fall back on.
+Two pairs used to share a tint on purpose — `idle`/`busy` and
+`attention`/`dizzy` — and the separations below were what kept those pairs
+apart. They now do that job for all 21 pairs, which makes this table the
+product's only state signal and a regression in it a regression in what the
+buddy can say.
+
+Silhouette distance below is `1 - soft IoU` of two glyphs' alpha masks at the
+real 22pt/2x size, each energy-normalised (so a heavier glyph cannot score
+"different" merely by painting more ink) and Gaussian-blurred at sigma 1.2px to
+stand in for the detail that does not survive at menu bar size. 0 is the same
+shape, 1 is no overlap; colour is not an input.
+
+| Pair | Before #37 | Now |
+|---|---|---|
+| `idle` / `busy` | 0.109 (`circle` vs `circle.dotted` — one ring, differing only in stroke continuity) | 0.754 |
+| `attention` / `dizzy` | 0.736 (both an orange exclamation mark) | 0.780 |
+| closest of all 21 pairs | 0.109 | 0.682 (`busy` / `heart`) |
+
+`Tests/ContextBuddyAppTests/StatusItemIconTests.swift` holds both pairs above
+0.45 and every pair above 0.40.
+
+**Even optical weight.** Ink coverage is the alpha-weighted fraction of the
+22pt glyph box a symbol paints, measured through an opaque tint so it describes
+the glyph and not the colour. It spans at most **2x** across the seven.
+Measured 9.27% (`busy`) to 16.37% (`idle`) = 1.77x. Before #37 it spanned 5.9x,
+from `circle.dotted` at 3.18% — the faintest glyph in the set, and the one
+shown most of the time work is happening — to `heart.fill` at 18.63%.
+
+The tint's own alpha is deliberately outside that number. `sleep` is the one
+translucent tint and renders 6.63% on a dark bar and 6.06% on a light one once
+its transparency is applied, against the same moon's 11.07% opaque; that
+dimming is a property of the colour, governed by the contrast floors below, and
+folding it in here would report a deliberately quiet state as a badly drawn
+one.
+
+
+**Contrast floor.** The glyph is a template image and the system colours it, so
+its contrast against the menu bar is the system's own. §9.1 asserts **parity
+with the system's menu bar items**, measured, rather than a number against a
+modelled bar.
+
+*The basis, and why it is a band of measured backgrounds rather than two greys.*
+Until #90 this section asserted 4.5:1 against sRGB grey 0.11 for the dark menu
+bar and 0.96 for the light one. Neither background occurs. Measured on macOS
+26.6.2 by sweeping the desktop picture from black to white and reading the bar
+back out of screen captures:
+
+- **The menu bar is transparent, not translucent over a dark material.** It
+  reads rgb (0,0,0), L=0.0000 over a black desktop picture and rgb
+  (251,251,251), L=0.9647 over a white one. The modelled dark bar's L=0.011 is
+  not a near miss; the bar spans essentially the whole range.
+- **macOS switches the status item's effective appearance with the wallpaper's
+  brightness, while the system stays in Dark Mode.** A probe status item tinted
+  blue under `.darkAqua` and red under `.aqua` rendered blue over a black
+  picture and red over a white one. The appearance does track the bar — that
+  part of the model was always right.
+- **The two appearances cover disjoint bands.** Measured `.darkAqua`
+  L = [0.000, 0.195] and `.aqua` L = [0.546, 0.965]. The switch is a step:
+  desktop grey 160 gives a `.darkAqua` bar at L=0.195, grey 168 an `.aqua` bar
+  at L=0.546. **Nothing between 0.195 and 0.546 is reachable**, so a floor
+  asserted at L=0.35 — as an earlier draft of #90 proposed — would be asserted
+  against a background that does not exist.
+
+*Why no tint could have worked.* Clearing 4.5:1 at the top of the `.darkAqua`
+band from the light side needs a glyph at L ≥ 1.052. Pure white is 1.0 and
+reaches 4.29:1. Going dark instead needs L ≤ −0.039. Both are impossible, so
+**no flat colour clears 4.5:1 across the `.darkAqua` band** — this is a proof
+about the band, not a tuning failure, and it is why #44, #87, #88 and #91 each
+optimised a tint table that could not have been made correct.
+
+*What ships instead, measured.* Ink versus its own local bar, from screen
+captures of the running status item, with Docker's icon measured in the same
+frames as the control:
+
+| menu bar | ContextBuddy | Docker |
+|---|---|---|
+| L = 0.000 (black picture) | 16.83:1 | 16.79:1 |
+| L = 0.147 (the author's wallpaper) | 4.69:1 | 4.62:1 |
+| L = 0.188 (top of the `.darkAqua` band) | **3.92:1** | **3.93:1** |
+| L = 0.521 (bottom of the `.aqua` band) | 9.37:1 | 9.27:1 |
+| L = 0.956 (white picture) | 15.06:1 | 14.74:1 |
+
+ContextBuddy tracks the system's own menu bar items within 2% at every
+background. **The floor is 3.92:1, at the top of the `.darkAqua` band** — and
+that is a macOS ceiling, not a ContextBuddy defect: Docker measures 3.93:1 at
+the same background, and the arithmetic above shows nothing can exceed 4.29:1
+there. §9.1 states 3.92:1 rather than 4.5:1 because 4.5:1 is not reachable on
+this platform, and a floor the product cannot hold is what #90 was filed about.
+
+`.labelColor` is **not** an acceptable substitute for leaving the tint nil. Its
+alpha lets the bar through: measured 8.84:1 where the untinted template measured
+15.06:1 on a white bar, and 4.29:1 against the untinted template's 4.69:1 on the
+author's wallpaper.
+
+*Which states carry a treatment.* **None.** #90 authorised a self-contrasting
+treatment — outline, shadow or backing shape — for any state that could not
+clear the band flat, and on the measured band that would have been all seven.
+The treatment is unnecessary because the sanctioned path already delivers
+system parity: a black rim measured a worst case of 2.98:1 across the
+`.darkAqua` band, and the only shape that reached 4.5:1 everywhere was a
+three-tone halo that read as a sticker set and moved ink coverage off its stated
+band. Reaching for a treatment before trying the platform's own mechanism was
+the error; it is recorded here so the next change does not repeat it.
+
+*What `sleep` lost.* §9.1 used to claim `sleep` is the least assertive of the
+seven, as a conjunction of four clauses, and colour carried three of them —
+`sleep` was the only tint that was achromatic *and* below full label strength,
+and the lowest-contrast state on a light bar. The system now draws all seven in
+one ink, so none of those can be true of `sleep` in particular. The drawing does
+not rescue the claim either: `moon.zzz` paints 11.07% of the glyph box against
+`busy` at 9.27%, `celebrate` at 9.72% and `heart` at 10.15%, so `sleep` is
+mid-pack rather than lightest. **What remains is that `sleep` is motionless and
+carries no colour of its own.** The guarantee is weaker than it was and is
+recorded here as weaker rather than restated in a form that is not true.
+
+Three constraints on anyone changing this:
+
+- **Do not set `contentTintColor`.** It is the mechanism, and the only reason
+  the glyph inverts with the bar. `StatusIconImageView.render` sets it to nil
+  explicitly, not by omission, because the view is reused across states.
+- **Do not set `isTemplate = false`.** A non-template image ignores the view's
+  colour entirely, so it ignores the system's choice too and draws SF Symbols'
+  own rendering — black for the monochrome symbols, the multicolor variant for
+  the rest (#34).
+- **Do not assert absolute contrast from an offscreen render.** There is no
+  vibrancy source in `xctest`, so an untinted template resolves to the
+  equivalent of `.secondaryLabelColor` — pure white at alpha 0.549 under
+  `.darkAqua`, pure black at alpha 0.502 under `.aqua` — and composites to
+  2.44:1 at the top of the `.darkAqua` band. That number describes the test
+  process, not the product. The suite asserts the *mechanism* (tint nil,
+  `isTemplate` true, ink at the achromatic pole of its appearance) and the
+  *direction* of the glyph against every background in the band; the absolute
+  numbers in the table above come from screen captures, and the PR that changes
+  them carries one. Assert glyph ink coverage separately, so a legible colour
+  cannot ship as an invisible hairline.
 
 ### 9.2 Animation policy
 
@@ -710,6 +928,7 @@ This section is non-negotiable. The buddy is peripheral and quiet; deviations fr
 - Content (top to bottom):
   - State name + emoji (e.g., "🟡 attention"), the turn/phase badge (`turn 7 · post`), and the project hash fragment
   - Horizontal rule
+  - Grader-status row — present only when `grader_status.json` reports `status: "error"` (§4.10): `⚠︎ grading unavailable — <backend>: <reason>`, in the `attention` orange, with the record's `detail` and the attempt's turn/phase/timestamp as its tooltip. Above the meters rather than in place of them: the failure that hides is a credential that dies *after* a healthy session, where `last.json` still holds a good grade and every meter still renders. `skipped` is the grader working and draws no row.
   - Score meters — one row per dimension (see below)
   - Token economics row
   - Dominant rationale (the rationale of the dimension whose threshold cross drove the state, OR a synthesized line for `loop`/`context_pressure`/`celebrate`; `harm` has no dominant-rationale line yet — its numbers live in the "Why this grade" harm row below, and a synthesized line is deferred)
@@ -733,7 +952,7 @@ Colour encodes distance from the threshold, never raw magnitude:
 
 | Condition | Colour |
 |---|---|
-| Past the §5.2 attention threshold | orange (the `attention` icon tint, §9.1) |
+| Past the §5.2 attention threshold | orange (the `attention` hue family, §9.1 — not that row's menu-bar tint, which carries an appearance-specific variant) |
 | Exactly at the threshold | yellow |
 | Otherwise | secondary/neutral |
 
@@ -767,6 +986,7 @@ backend packs the same digest into it and rendering both repeats every number.
 
 - "Ack current state" (disabled when in `idle`/`sleep`/`busy`)
 - "Mute current signal — this session"
+- Grader-status line — one disabled item, `⚠︎ grading unavailable — <backend>: <reason>`, shown only when §4.10 reports `status: "error"`, with `detail` as its tooltip. Disabled because the fix is outside the app (a credential or a `[grader]` setting); the row informs rather than offering an action the buddy cannot perform. Absent entirely when grading works, so the menu grows no permanent row for a condition that is almost always fine.
 - "Recent sessions ▶" (submenu listing the last 5 sessions by project name, allowing pin-to). Each item is titled with the project name resolved from the session's `meta.json` (§4.9), the same name as the §9.3 footer row; a session dir with no `meta.json` shows the hash prefix (`abcdef…`), never a blank row. Two visible sessions that resolve to the same name each carry their hash prefix as a suffix (`api (abcdef)`) so the rows stay distinguishable. The item's pin target and its checkmark are keyed on the full hash, never the title.
 - "Open inspector folder"
 - separator
@@ -890,7 +1110,8 @@ The buddy and the plugin must each fail gracefully when the other is absent or m
 - **Buddy without plugin**: menubar shows `sleep`. Polls FSEvents normally; no events arrive; state remains `sleep`.
 - **Malformed `last.json`**: buddy logs to stderr, retains previous state, continues watching.
 - **Missing `session.md`**: plugin grader prompt notes its absence; scores produced are advisory but flagged with reduced confidence in rationale ("session.md not found — grading against prompt only").
-- **Anthropic API error (rate limit, timeout)**: plugin logs and skips that grade. No file is written. Buddy state remains as-of-previous-grade.
+- **Anthropic API error (rate limit, timeout)**: plugin logs and skips that grade. No grade file is written; `grader_status.json` records `transport_failure` (§4.10). Buddy state remains as-of-previous-grade.
+- **Grader cannot run at all (no credential, missing tool, unparseable answer)**: plugin logs to stderr, writes `grader_status.json` with the backend and the reason class, and exits 0. Control flow is unchanged — this adds a trace, it does not gate anything. Logging to stderr alone was the defect: hook stderr reaches no surface a user checks, so the condition ran for weeks unseen (issue #92).
 - **`transcript_path` missing, unreadable, or not a regular file**: the hook grades with an empty turn window and a transcript `tokens_used` of 0 (the grader's own token fields stand), writes one `contextbuddy:` warning to stderr, exits 0, and still writes the grade.
 - **`jq` missing**: `transcript_window` degrades to the same empty window with a `contextbuddy:` warning and the hook continues; exit 0 in every case. On the default `anthropic` backend the grade is still written, unvalidated, because the §4.1 check and the mechanical `dominant_signal` overrides need jq. `ollama` and `openai_compatible` refuse up front in `grader/invoke.sh` and `typesafe` cannot build its job file, so those grades are logged and skipped.
 - **SQLite corruption**: buddy logs error and recreates state.db with empty tables. Feedback events are lost; state.db is best-effort, not durable contract.

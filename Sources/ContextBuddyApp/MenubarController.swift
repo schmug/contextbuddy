@@ -108,6 +108,7 @@ final class MenubarController: NSObject, NSMenuDelegate {
         StatusItemIcon.apply(
             state: snapshot.state,
             animationsEnabled: StatusItemIcon.animationsEnabled(ui: snapshot.ui, reduceMotion: reduceMotion),
+            graderStatus: snapshot.graderStatus,
             to: button
         )
     }
@@ -189,6 +190,13 @@ final class MenubarController: NSObject, NSMenuDelegate {
 
         menu.addItem(buildRecentSessionsMenu())
         menu.addItem(NSMenuItem.separator())
+
+        // One disabled line when the grader could not run (§9.4, issue #92).
+        // Absent entirely when grading is working, so the menu does not grow a
+        // permanent row for a condition that is almost always fine.
+        if let graderStatus = snapshot.graderStatus, graderStatus.isFailure {
+            menu.addItem(Self.graderStatusMenuItem(for: graderStatus))
+        }
 
         let openFolder = NSMenuItem(
             title: "Open inspector folder",
@@ -285,6 +293,18 @@ final class MenubarController: NSObject, NSMenuDelegate {
             guard let name else { return prefix + "…" }
             return occurrences[name, default: 0] > 1 ? "\(name) (\(prefix))" : name
         }
+    }
+
+    // Static and free of controller state so the wording is testable without a
+    // BuddyCore or an NSStatusItem, the same arrangement as recentSessionItems.
+    // Disabled: there is nothing to click. The fix is outside the app — it is a
+    // credential or a [grader] setting — so the row informs and the detail sits
+    // in the tooltip rather than offering an action the buddy cannot perform.
+    static func graderStatusMenuItem(for status: GraderStatus) -> NSMenuItem {
+        let item = NSMenuItem(title: "⚠︎ \(status.summaryLine)", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.toolTip = status.detail
+        return item
     }
 
     private var canAck: Bool {

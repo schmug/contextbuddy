@@ -147,7 +147,7 @@ created_at: 2026-04-29T09:14:00Z
 }
 ```
 
-**Buddy state**: `idle` → `attention` (atomicity 3 < 4 threshold). Orange triangle in menubar.
+**Buddy state**: `idle` → `attention` (atomicity 3 < 4 threshold). Warning triangle in the menubar, with a one-shot pulse.
 
 **Popover**:
 ```
@@ -407,6 +407,7 @@ Different backends produce different score distributions; don't mix-and-match wi
 └── sessions/
     └── <project-hash>/         # sha256(canonical_project_path)[:12]
         ├── session.md          # YAML frontmatter; you author this
+        ├── grader_status.json  # outcome of the last grader attempt
         ├── last.json           # most recent grade
         ├── history.jsonl       # append-only grade log
         ├── suggestions.md      # append-only attention/dizzy log
@@ -424,6 +425,28 @@ Different backends produce different score distributions; don't mix-and-match wi
 `<project-hash>` is computed from the project path with symlinks resolved (`realpath`), so `/tmp/foo` and `/private/tmp/foo` share one session directory. Before this, the two forms hashed differently and a session could split across two directories mid-conversation.
 
 **Migration note:** sessions created under a symlinked path before this change (anything under `/tmp` or `/var`, a symlinked Homebrew prefix, a mounted dev volume) were hashed from the unresolved string, and the plugin and the app now read the canonical hash directory instead. Nothing is migrated automatically. To keep an old session, copy its files into the canonical directory (or rename the directory if the canonical one does not exist yet); `source plugin/lib/project_hash.sh && project_hash "$PWD"` prints the new name from inside the project. Leaving the old directory in place is harmless.
+
+### Why is nothing being graded?
+
+`grader_status.json` in the session directory answers it. The hooks write it on every grader attempt, whether or not a grade came out:
+
+```bash
+jq -r '"\(.status) \(.reason // "") — \(.detail)"' \
+  ~/.claude/inspector/sessions/$(printf '%s' "$PWD" | shasum -a 256 | cut -c1-12)/grader_status.json
+```
+
+`status` is `ok`, `skipped` (the grader ran and declined the turn — not a fault) or `error`. On `error`, `reason` is one of `missing_key`, `not_configured`, `transport_failure` or `invalid_response`, and `detail` says what to do. The most common is `missing_key` in a project other than the one holding your `.env`: `plugin/lib/dotenv.sh` only searches `$PWD/.env`, the worktree root and the main checkout, so exporting the key into the environment Claude Code inherits is the route that works everywhere.
+
+To sweep every project at once:
+
+```bash
+jq -r 'select(.status == "error") | "\(.backend)\t\(.reason)\t\(input_filename)"' \
+  ~/.claude/inspector/sessions/*/grader_status.json
+```
+
+The record never contains the key's value, or anything the backend printed — only the backend name, a reason class derived from the grader's exit code, and a fixed sentence. The backend's own message still goes to the hook's stderr (`claude --debug`).
+
+When the last attempt failed, the buddy says so too: an orange row in the popover, a second line on the menubar tooltip, and a disabled line in the right-click menu. The icon itself does not change — a grader fault is not one of the seven states.
 
 ---
 
